@@ -1,12 +1,69 @@
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from tyon_monitor import (
     AxisStats,
+    CaptureRequest,
     JoystickInfo,
     choose_device,
     parse_xcelerator_report,
+    monitor_args_for_request,
+    run_capture,
     xcal_command,
 )
+
+
+class CaptureRequestTests(unittest.TestCase):
+    def test_paddle_request_includes_baseline_in_raw_duration(self):
+        request = CaptureRequest("paddle")
+
+        self.assertTrue(request.raw)
+        self.assertEqual(request.monitor_duration, 12.0)
+
+    def test_wheel_request_keeps_baseline_outside_monitor_duration(self):
+        request = CaptureRequest("wheel", baseline_seconds=2.0, action_seconds=10.0)
+
+        self.assertFalse(request.raw)
+        self.assertEqual(request.monitor_duration, 10.0)
+
+    def test_request_rejects_unknown_trial(self):
+        with self.assertRaises(ValueError):
+            CaptureRequest("trackball")
+
+    def test_request_builds_raw_paddle_arguments(self):
+        args = monitor_args_for_request(CaptureRequest("paddle"), "paddle.csv")
+
+        self.assertTrue(args.raw)
+        self.assertEqual(args.duration, 12.0)
+        self.assertEqual(args.output, "paddle.csv")
+        self.assertEqual(args.start_delay, 0)
+
+    def test_request_builds_read_only_wheel_arguments(self):
+        args = monitor_args_for_request(CaptureRequest("wheel"), "wheel.csv")
+
+        self.assertFalse(args.raw)
+        self.assertEqual(args.duration, 10.0)
+        self.assertEqual(args.trial, "wheel")
+
+    @patch("tyon_monitor.run_monitor", return_value=0)
+    @patch("tyon_monitor.default_log_path", return_value=Path("captures/tyon-xcelerator-base.csv"))
+    def test_run_capture_uses_read_only_runner_and_returns_summary(self, default_path, run_monitor):
+        result = run_capture(CaptureRequest("wheel", start_delay_seconds=0))
+
+        self.assertEqual(result.output, Path("captures/tyon-wheel-base.csv"))
+        self.assertFalse(result.cancelled)
+        self.assertEqual(result.exit_code, 0)
+        run_monitor.assert_called_once()
+
+    @patch("tyon_monitor.run_raw_monitor", return_value=3)
+    @patch("tyon_monitor.default_log_path", return_value=Path("captures/tyon-xcelerator-base.csv"))
+    def test_run_capture_uses_raw_runner_for_paddle(self, default_path, run_raw_monitor):
+        result = run_capture(CaptureRequest("paddle", start_delay_seconds=0))
+
+        self.assertEqual(result.output, Path("captures/tyon-xcelerator-raw-base.csv"))
+        self.assertEqual(result.exit_code, 3)
+        run_raw_monitor.assert_called_once()
 
 
 class AxisStatsTests(unittest.TestCase):

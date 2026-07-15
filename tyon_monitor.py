@@ -35,6 +35,79 @@ SPECIAL_REPORT_ID = 0x03
 SPECIAL_TYPE_XCAL = 0xE0
 
 
+@dataclass(frozen=True)
+class CaptureRequest:
+    """The fixed timing and mode used by the compact capture window."""
+
+    trial: str
+    start_delay_seconds: float = 1.0
+    baseline_seconds: float = 2.0
+    action_seconds: float = 10.0
+
+    def __post_init__(self) -> None:
+        if self.trial not in ("paddle", "wheel"):
+            raise ValueError("trial must be 'paddle' or 'wheel'")
+        if min(self.start_delay_seconds, self.baseline_seconds, self.action_seconds) < 0:
+            raise ValueError("capture timings cannot be negative")
+
+    @property
+    def raw(self) -> bool:
+        return self.trial == "paddle"
+
+    @property
+    def monitor_duration(self) -> float:
+        """Seconds passed to the legacy monitor loop.
+
+        The normal joystick path takes its baseline before its timed loop; the
+        raw paddle path takes it inside that loop.
+        """
+        if self.raw:
+            return self.baseline_seconds + self.action_seconds
+        return self.action_seconds
+
+
+def monitor_args_for_request(request: CaptureRequest, output: str) -> argparse.Namespace:
+    """Translate a compact-window request to the existing monitor options."""
+    return argparse.Namespace(
+        raw=request.raw,
+        trial=request.trial,
+        device=None,
+        duration=request.monitor_duration,
+        start_delay=0,
+        poll_hz=250.0,
+        display_hz=5.0,
+        baseline_seconds=request.baseline_seconds,
+        away_threshold=1500,
+        no_scroll_events=False,
+        output=output,
+        verbose=False,
+        list=False,
+    )
+
+
+@dataclass(frozen=True)
+class CaptureProgress:
+    phase: str
+    message: str
+
+
+@dataclass(frozen=True)
+class CaptureResult:
+    request: CaptureRequest
+    output: Path
+    cancelled: bool
+    exit_code: int
+    summary: dict[str, object]
+
+
+ProgressCallback = Callable[[CaptureProgress], None]
+
+
+def _progress(callback: ProgressCallback | None, phase: str, message: str) -> None:
+    if callback is not None:
+        callback(CaptureProgress(phase, message))
+
+
 class JOYINFOEX(ctypes.Structure):
     _fields_ = [
         ("dwSize", ctypes.c_uint32),
@@ -358,14 +431,26 @@ def default_log_path() -> Path:
     return Path("captures") / f"tyon-xcelerator-{stamp}.csv"
 
 
-def preparation_countdown(seconds: int) -> None:
+def preparation_countdown(
+    seconds: float,
+    on_progress: ProgressCallback | None = None,
+    stop_event: threading.Event | None = None,
+) -> bool:
+    """Wait before a capture, returning false when a stop was requested."""
     if seconds <= 0:
-        return
-    print("Prepare for capture:", end="", flush=True)
-    for remaining in range(seconds, 0, -1):
-        print(f" {remaining}", end="", flush=True)
-        time.sleep(1)
-    print()
+        return True
+    deadline = time.perf_counter() + seconds
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        remaining = max(0.0, deadline - time.perf_counter())
+        if on_progress is not None:
+            _progress(on_progress, "prepare", f"Get ready — starting in {max(1, round(remaining))}s")
+        else:
+            print(f"Prepare for capture: {max(1, round(remaining))}", flush=True)
+        if remaining <= 0:
+            return True
+        time.sleep(min(0.05, remaining))
 
 
 def write_row(
@@ -403,8 +488,14 @@ def write_row(
     writer.writerow(row)
 
 
-def run_monitor(args: argparse.Namespace) -> int:
-    preparation_countdown(args.start_delay)
+def run_monitor(
+    args: argparse.Namespace,
+    on_progress: ProgressCallback | None = None,
+    stop_event: threading.Event | None = None,
+    summary: dict[str, object] | None = None,
+) -> int:
+    if not preparation_countdown(args.start_delay, on_progress, stop_event):
+        return 0
     api = WinMMJoystickApi()
     devices = api.devices()
     if args.list:
@@ -424,9 +515,12 @@ def run_monitor(args: argparse.Namespace) -> int:
         f"Keep the paddle untouched for the {args.baseline_seconds:g}s baseline...",
         flush=True,
     )
+    _progress(on_progress, "baseline", "Leave the wheel and paddle untouched for 2 seconds.")
     baseline, baseline_samples = collect_baseline(
         read, args.baseline_seconds, args.poll_hz
     )
+    if stop_event is not None and stop_event.is_set():
+        return 0
     print(
         "Baseline: "
         + " ".join(f"{axis}={baseline[axis]}" for axis in AXES)
@@ -475,11 +569,19 @@ def run_monitor(args: argparse.Namespace) -> int:
         print("Use ONLY the physical wheel up/down now. Do not touch the paddle.")
     else:
         print("Move and release the paddle normally. Press Ctrl+C to stop.")
+    _progress(
+        on_progress,
+        "action",
+        "Move ONLY the physical wheel up and down." if args.trial == "wheel"
+        else "Move and release ONLY the X-Celerator paddle.",
+    )
     try:
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
-            while deadline is None or time.perf_counter() < deadline:
+            while (deadline is None or time.perf_counter() < deadline) and not (
+                stop_event is not None and stop_event.is_set()
+            ):
                 loop_started = time.perf_counter()
                 sample = read()
                 last_sample = sample
@@ -538,10 +640,22 @@ def run_monitor(args: argparse.Namespace) -> int:
     primary = max(AXES, key=lambda axis: stats[axis].span)
     print(f"Largest-changing axis: {primary} (span {stats[primary].span})")
     print(f"Capture saved: {path.resolve()}")
+    if summary is not None:
+        summary.update({
+            "samples": samples,
+            "scroll_events": scroll_events,
+            "primary_axis": primary,
+            "primary_span": stats[primary].span,
+        })
     return 0
 
 
-def run_raw_monitor(args: argparse.Namespace) -> int:
+def run_raw_monitor(
+    args: argparse.Namespace,
+    on_progress: ProgressCallback | None = None,
+    stop_event: threading.Event | None = None,
+    summary: dict[str, object] | None = None,
+) -> int:
     """Temporarily stream raw paddle reports without saving calibration."""
     try:
         import hid
@@ -605,7 +719,8 @@ def run_raw_monitor(args: argparse.Namespace) -> int:
 
     print("RAW MODE: no calibration values will be saved.")
     print(f"Writing {output.resolve()}")
-    preparation_countdown(args.start_delay)
+    if not preparation_countdown(args.start_delay, on_progress, stop_event):
+        return 0
     try:
         raw_device.open_path(path_value)
         vendor_device, device_name = open_tyon()
@@ -621,6 +736,7 @@ def run_raw_monitor(args: argparse.Namespace) -> int:
             f"Leave the paddle untouched for {args.baseline_seconds:g}s, then move and release it. "
             "Press Ctrl+C to stop."
         )
+        _progress(on_progress, "baseline", "Leave the paddle untouched for 2 seconds.")
         if not args.no_scroll_events:
             warning = capture.start()
             if warning:
@@ -630,7 +746,9 @@ def run_raw_monitor(args: argparse.Namespace) -> int:
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
             action_announced = False
-            while deadline is None or time.perf_counter() < deadline:
+            while (deadline is None or time.perf_counter() < deadline) and not (
+                stop_event is not None and stop_event.is_set()
+            ):
                 report = raw_device.read(64, 25)
                 now = time.perf_counter()
                 if report:
@@ -651,6 +769,7 @@ def run_raw_monitor(args: argparse.Namespace) -> int:
                             next_display = now + 1.0 / args.display_hz
                 if not action_announced and now - started >= args.baseline_seconds:
                     print("\nGO: use ONLY the X-Celerator paddle up/down for 10 seconds.")
+                    _progress(on_progress, "action", "Move ONLY the X-Celerator paddle up and down.")
                     action_announced = True
                 for timestamp, x, y, dx, dy in capture.drain():
                     scroll_events += 1
@@ -694,10 +813,55 @@ def run_raw_monitor(args: argparse.Namespace) -> int:
             f"baseline span={baseline_span}, full range={min(values)}..{max(values)}, "
             f"scroll events={scroll_events}, unmatched reports={unmatched}."
         )
+        if summary is not None:
+            summary.update({
+                "reports": len(values),
+                "baseline": baseline,
+                "baseline_span": baseline_span,
+                "raw_range": (min(values), max(values)),
+                "scroll_events": scroll_events,
+                "unmatched": unmatched,
+            })
     else:
         print(f"No X-Celerator raw reports received; unmatched reports={unmatched}.")
+        if summary is not None:
+            summary.update({"reports": 0, "scroll_events": scroll_events, "unmatched": unmatched})
     print(f"Capture saved: {output.resolve()}")
     return 0 if values else 3
+
+
+def capture_output_path(request: CaptureRequest) -> Path:
+    """Return the normal timestamped filename for a compact-window capture."""
+    output = default_log_path()
+    if request.raw:
+        name = output.stem.replace("tyon-xcelerator", "tyon-xcelerator-raw")
+    else:
+        name = output.stem.replace("tyon-xcelerator", "tyon-wheel")
+    return output.with_name(name + output.suffix)
+
+
+def run_capture(
+    request: CaptureRequest,
+    on_progress: ProgressCallback | None = None,
+    stop_event: threading.Event | None = None,
+) -> CaptureResult:
+    """Run a compact-window request through the existing monitor implementation."""
+    stop_event = stop_event or threading.Event()
+    output = capture_output_path(request)
+    if not preparation_countdown(request.start_delay_seconds, on_progress, stop_event):
+        return CaptureResult(request, output, True, 0, {})
+
+    args = monitor_args_for_request(request, str(output))
+    summary: dict[str, object] = {}
+    runner = run_raw_monitor if request.raw else run_monitor
+    exit_code = runner(args, on_progress, stop_event, summary)
+    return CaptureResult(
+        request=request,
+        output=output,
+        cancelled=stop_event.is_set(),
+        exit_code=exit_code,
+        summary=summary,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

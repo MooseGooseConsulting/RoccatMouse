@@ -154,14 +154,16 @@ the profile's scroll action.
 .\monitor.bat --duration 30                  # 30-second diagnostic capture
 .\monitor.bat --device 0                     # select a slot when several exist
 .\monitor.bat --raw --duration 30            # temporary raw 0..255 sensor stream
-.\capture-paddle.bat                         # 2s neutral + 10s paddle-only trial
-.\capture-wheel.bat                          # 2s neutral + 10s wheel-only trial
+.\capture-paddle.bat                         # opens compact capture window, paddle selected
+.\capture-wheel.bat                          # opens compact capture window, wheel selected
 ```
 
-Keep the paddle untouched during the initial two-second baseline, then move it
-up/down and let it return normally. Captures are written to timestamped CSV
-files under `captures\`; avoid using the wheel during a correlated test because
-Windows scroll events do not identify which physical control produced them.
+The compact window gives a one-second warning, then records a two-second
+untouched baseline followed by a ten-second controlled trial. Both launchers
+open the same window, so you can switch between paddle and wheel tests before
+starting. Captures are written to timestamped CSV files under `captures\`;
+avoid using the wheel during a correlated paddle test because Windows scroll
+events do not identify which physical control produced them.
 
 The default path is entirely read-only. Because a scroll-mapped paddle is
 converted to wheel events inside the firmware, `--raw` temporarily enters the
