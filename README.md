@@ -142,6 +142,34 @@ CLI (lighting + diagnostics):
 
 `rgb.bat --help` lists every flag.
 
+### X-Celerator signal monitor
+
+`monitor.bat` records the paddle's Windows joystick axes without sending any
+feature or output reports to the mouse. It also correlates global scroll events
+when `pynput` is available, which helps distinguish sensor/centering drift from
+the profile's scroll action.
+
+```pwsh
+.\monitor.bat --list                         # show readable joystick slots
+.\monitor.bat --duration 30                  # 30-second diagnostic capture
+.\monitor.bat --device 0                     # select a slot when several exist
+.\monitor.bat --raw --duration 30            # temporary raw 0..255 sensor stream
+.\capture-paddle.bat                         # 2s neutral + 10s paddle-only trial
+.\capture-wheel.bat                          # 2s neutral + 10s wheel-only trial
+```
+
+Keep the paddle untouched during the initial two-second baseline, then move it
+up/down and let it return normally. Captures are written to timestamped CSV
+files under `captures\`; avoid using the wheel during a correlated test because
+Windows scroll events do not identify which physical control produced them.
+
+The default path is entirely read-only. Because a scroll-mapped paddle is
+converted to wheel events inside the firmware, `--raw` temporarily enters the
+mouse's calibration-report mode to expose the underlying 0..255 sensor value.
+It always sends the matching end command in cleanup and never sends the
+separate command that saves calibration values, so onboard profiles remain
+unchanged.
+
 ## Where settings live
 
 GUI preferences, game profiles, and recorded build orders are stored under
@@ -157,6 +185,7 @@ in the mouse's own onboard flash, not on disk.
 | `tyon_gui.py` | PySide6 GUI (the app) |
 | `tyon_widgets.py` | Theme, color wheel, and custom widgets |
 | `tyon_input.py` | Host-side recorder/player (pynput) for the SC2 trainer |
+| `tyon_monitor.py` | Read-only X-Celerator axis and scroll-event monitor |
 | `tyon_store.py` | Persistent prefs, game profiles, and build orders |
 | `make_icon.py` | Generates `tyon.ico` for the Desktop shortcut |
 | `rgb.bat` / `gui.bat` | Convenience launchers (use the venv python) |
