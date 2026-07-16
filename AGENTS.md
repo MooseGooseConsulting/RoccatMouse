@@ -28,6 +28,7 @@ Authority flows from `NORTH_STAR.md` to `architecture.md` to `PROGRESS.md`. This
 - List diagnostic axes safely: `python tyon_monitor.py --list`
 - Launch configurator: `gui.bat`
 - Launch controlled capture: `capture-gui.bat`
+- Launch continuous observation tray: `tray.bat`
 
 ## Working Rules
 

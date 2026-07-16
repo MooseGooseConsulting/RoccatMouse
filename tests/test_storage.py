@@ -52,6 +52,7 @@ class StorageTests(unittest.TestCase):
 
     def test_failed_migration_rolls_back_its_version(self):
         connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
         with self.assertRaises(sqlite3.OperationalError):
             apply_migrations(connection, [(1, "CREATE TABLE ok(id INTEGER);"), (2, "BROKEN SQL")])
         self.assertEqual(connection.execute("SELECT version FROM schema_migrations").fetchall(), [(1,)])

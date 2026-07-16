@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from .models import TelemetryEvent
+from .models import TelemetryEvent, Timestamp
 
 SECOND_NS = 1_000_000_000
 
@@ -110,6 +110,40 @@ class OneSecondAccumulator:
         current = self._current
         self._current = None
         return [current]
+
+    def advance(self, session_id: str, timestamp: Timestamp) -> list[AggregateBucket]:
+        """Close elapsed buckets without inventing a telemetry sample."""
+        start_ns = timestamp.monotonic_ns // SECOND_NS * SECOND_NS
+        if self._current is None:
+            offset = (timestamp.monotonic_ns - start_ns) / SECOND_NS
+            self._current = AggregateBucket(
+                session_id,
+                start_ns,
+                timestamp.utc - timedelta(seconds=offset),
+            )
+            return []
+        if start_ns <= self._current.bucket_start_ns:
+            return []
+        completed = [self._current]
+        previous = self._current
+        next_ns = previous.bucket_start_ns + SECOND_NS
+        while next_ns < start_ns:
+            completed.append(
+                AggregateBucket(
+                    session_id,
+                    next_ns,
+                    previous.bucket_start_utc
+                    + timedelta(seconds=(next_ns - previous.bucket_start_ns) / SECOND_NS),
+                )
+            )
+            next_ns += SECOND_NS
+        offset = (timestamp.monotonic_ns - start_ns) / SECOND_NS
+        self._current = AggregateBucket(
+            session_id,
+            start_ns,
+            timestamp.utc - timedelta(seconds=offset),
+        )
+        return completed
 
     @staticmethod
     def _new_bucket(event: TelemetryEvent, start_ns: int) -> AggregateBucket:

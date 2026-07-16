@@ -27,7 +27,8 @@ Keep the proven Python/PySide6 Windows configurator as the product base, isolate
 | Controlled capture | Current | Bounded paddle and wheel trials, WinMM axes, MI_03 reports, scroll deltas, raw-mode recovery, CSV export, and compact GUI. |
 | Platform contracts | Current | `DeviceControl`, `AcceleratorSource`, `InputEventSource`, `TelemetrySink`, `Clock`, and `CaptureSession` boundaries; persistent store and analysis contracts arrive with their milestones. |
 | Normal-mode trial engine | Current | Guided neutral, paddle-only, wheel-only, symptom-reproduction, and general-observation phases without entering raw calibration mode. |
-| Continuous observation | Planned | On-demand tray runtime, one-second aggregates, discrete events, reconnect handling, and 30-day retention. |
+| Continuous observation | Current | On-demand tray runtime, normal Tyon Raw Input, one-second aggregates, discrete events, durable symptom markers, clean start/stop, and 30-day retention. |
+| Observation resilience | Planned | Disconnect/reconnect transitions, bounded backoff, startup recovery, inspection/export commands, and eight-hour soak evidence. |
 | Telemetry database | Current | Local SQLite database in WAL mode with numbered migrations, sessions/events/aggregates/markers, strict sequence uniqueness, and 30-day continuous-session retention. |
 | Analysis dashboard | Planned | Live and historical accelerator/axis/scroll plots, anomaly markers, comparisons, and diagnosis summaries. |
 | Corrective tooling | Candidate | Evidence-gated calibration, mapping, or host intervention with backup, preview, confirmation, readback, and rollback. |

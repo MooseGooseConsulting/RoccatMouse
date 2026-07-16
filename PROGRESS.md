@@ -12,7 +12,7 @@ last_confirmed: 2026-07-15
 
 - PR #1 merged to `main` as `a38f1d6` with the controlled-capture foundation.
 - The Windows configurator remains intact.
-- Fifty-eight unit tests and the Windows CI workflow pass.
+- Seventy-eight unit tests and the Windows CI workflow pass.
 - Live discovery confirms the Tyon Telephony control collection and MI_03 special-report interface.
 - Raw capture cleanup and all five onboard-profile reads have been verified on the connected Windows 11 system.
 - The normal-mode engine records QPC/UTC ordered WinMM, MI_03, and device-attributed Raw Input events; short live neutral captures preserve all five profile fingerprints.
@@ -20,12 +20,14 @@ last_confirmed: 2026-07-15
 - Empty controlled paddle/wheel trials now fail explicitly with exit code 5 and exact causes instead of producing a false pass.
 - The final live read confirms active profile 1 maps both paddle directions to scrolling, all five profiles remain readable, and no raw-mode recovery marker exists.
 - Current hardware proof is complete: direct sensor capture produced 1,092 reports over 26–209; normal paddle output produced 125 Tyon-attributed wheel events in both directions with strict ordering and preserved profiles.
+- The continuous runtime now has atomic local config, SQLite/WAL migrations, bounded prioritized persistence, one-second aggregation, 30-day retention, tray start/stop, and immediate symptom markers with context queries.
+- A live connected-Tyon smoke stored one session, 11 discrete events, seven aggregates, and one marker; the 30-second context query returned the surrounding data and shutdown was clean.
 - Scroll CSVs contain deltas without pointer coordinates; cursor movement is not part of the diagnostic model.
 
 ## Active Work
 
 - Branch: `feature/continuous-windows-telemetry`.
-- Implement the persistent, on-demand observation and symptom-marking workflow; publish coherent slices early in a draft PR.
+- PR #5 is open as a draft. Complete reconnect/recovery, inspection/export, richer device sources, tray verification, and soak instrumentation.
 
 ## Blockers
 

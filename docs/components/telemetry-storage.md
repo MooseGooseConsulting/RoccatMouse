@@ -19,5 +19,7 @@ Continuous aggregates and their unmarked discrete events expire after 30 days.
 High-fidelity sessions remain until explicit export or deletion. Retention is
 transactional and tested at migration boundaries. The current store enables WAL,
 foreign keys, a busy timeout, numbered migrations, strict per-session sequence
-uniqueness, and marker-centered context queries. A bounded writer queue and tray
-runtime are the next active slice.
+uniqueness, and marker-centered context queries. A bounded single-writer queue
+prioritizes discrete events, counts replaceable aggregate drops under pressure,
+and surfaces database failures. Symptom markers bypass that queue and commit
+synchronously.
