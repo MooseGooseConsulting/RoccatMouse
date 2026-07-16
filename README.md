@@ -16,6 +16,11 @@ product base. Windows diagnostics are developed here; Linux remains a later
 stretch milestone. The exact upstream commits and the GPL reuse boundary are
 recorded in [the source audit](docs/source-audit.md).
 
+Project intent and future work are durable repository documents rather than
+chat-only plans: start with [NORTH_STAR.md](NORTH_STAR.md), then
+[architecture.md](architecture.md) and [PROGRESS.md](PROGRESS.md). Detailed
+milestone plans live under [docs/superpowers/plans/](docs/superpowers/plans/).
+
 ![Screenshot](docs/screenshot.png)
 
 ## Why this exists
