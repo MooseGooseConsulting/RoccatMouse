@@ -62,6 +62,10 @@ Thresholds are stored with the analysis version and session result. Defaults com
 
 Analyze the neutral, raw paddle, normal paddle, wheel-only, and symptom sessions. Confirm the dashboard never treats cursor motion as expected evidence. Produce a committed diagnosis report that identifies the supported fault layer or explicitly states what additional controlled trial is needed.
 
-## PR stop condition
+## PR workflow and ready condition
 
-Open the non-draft PR only after synthetic and hardware sessions render and compare correctly, exports round-trip, memory remains bounded, and the diagnosis report is reproducible. Self-review, address all valid feedback, merge, and update `main` before implementing a correction.
+Open a draft PR after the first coherent dashboard slice is pushed. Mark it ready
+after synthetic and hardware sessions render and compare correctly, exports
+round-trip, memory remains bounded, and the diagnosis report is reproducible.
+Self-review, address all valid feedback, merge, and update `main` before
+implementing a correction.

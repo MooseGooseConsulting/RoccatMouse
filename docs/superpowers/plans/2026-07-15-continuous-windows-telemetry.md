@@ -2,7 +2,7 @@
 
 - Status: Planned
 - Branch: `feature/continuous-windows-telemetry`
-- Depends on: normal-mode capture merged and hardware-accepted
+- Depends on: direct-sensor and normal-output capture proof merged
 
 ## Why
 
@@ -22,6 +22,28 @@ Add an on-demand tray runtime, SQLite WAL storage, numbered migrations, one-seco
 - `roccatmouse/tray.py`: PySide6 tray controller that starts/stops observation, opens Diagnostics, reports reconnect/cleanup state, and exits cleanly.
 
 The database path is `%LOCALAPPDATA%\RoccatMouse\telemetry.sqlite3`. Use one writer thread, bounded queues, batched transactions, WAL, foreign keys, and a busy timeout. High-fidelity sessions store full-rate events; continuous mode stores one-second aggregates plus discrete wheel/button/anomaly/marker events.
+
+## Symptom-marking workflow
+
+1. The owner starts **Continuous observation** from the tray when they want the
+   mouse watched. Automatic startup remains disabled.
+2. RoccatMouse stores one-second normal-mode aggregates plus every discrete
+   Tyon wheel, button, anomaly, disconnect, and reconnect event.
+3. When the paddle misbehaves, the owner chooses **Mark symptom now** from the
+   tray. The marker is committed immediately with QPC/UTC time; an optional
+   short note can be added without stopping observation.
+4. The dashboard presents at least 30 seconds before and 30 seconds after the
+   marker, including wheel directions, event bursts, relative movement,
+   reconnect/device state, and anomaly counts.
+5. The owner may start an explicit high-fidelity reproduction session when the
+   symptom is repeatable. Bounded raw-sensor capture remains a separate action
+   because raw calibration mode can suppress normal mapping.
+
+Windows reports the physical wheel and a scroll-mapped paddle as wheel events
+from the same Tyon mouse. Continuous observation therefore does not claim
+physical-source attribution for an unlabelled event. The symptom marker records
+the owner's observation that the paddle was involved; controlled one-input
+trials provide stronger attribution when needed.
 
 ## Test-first implementation sequence
 
@@ -63,6 +85,10 @@ Run continuous observation for eight hours with the Tyon connected. Record initi
 - ten disconnect/reconnect cycles do not strand capture or raw mode;
 - retention removes synthetic data older than 30 days while preserving retained sessions.
 
-## PR stop condition
+## PR workflow and ready condition
 
-Do not open the non-draft PR until the automated suite and eight-hour soak pass and their evidence is committed to `docs/history/`. Self-review, address all valid feedback, merge, and update `main` before dashboard work.
+Open a draft PR as soon as the first coherent storage/runtime slice is pushed so
+implementation and soak progress remain visible. Mark it ready only after the
+automated suite and eight-hour soak pass and their evidence is committed to
+`docs/history/`. Self-review continuously, address all valid feedback, merge,
+and update `main` before dashboard work.
