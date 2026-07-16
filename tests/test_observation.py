@@ -73,6 +73,8 @@ class ObservationTests(unittest.TestCase):
 
     def test_double_start_is_rejected(self):
         self.runtime.start()
+        session = self.store.connection.execute("SELECT state FROM sessions").fetchone()
+        self.assertEqual(session[0], "action")
         with self.assertRaisesRegex(RuntimeError, "already active"):
             self.runtime.start()
 

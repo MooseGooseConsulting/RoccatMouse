@@ -134,6 +134,7 @@ class ObservationRuntime:
                 self._accumulator = None
                 self._error = str(exc)
                 raise
+            self.store.set_session_state(session_id, SessionState.ACTION.value)
             self._timer_stop.clear()
             self._timer = threading.Thread(
                 target=self._timer_loop,

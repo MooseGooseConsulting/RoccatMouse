@@ -124,6 +124,10 @@ class SQLiteTelemetryStore:
                 ),
             )
 
+    def set_session_state(self, session_id: str, state: str) -> None:
+        with self._lock, self.connection:
+            self.connection.execute("UPDATE sessions SET state=? WHERE id=?", (state, session_id))
+
     def write_aggregate(self, bucket: AggregateBucket) -> None:
         with self._lock, self.connection:
             self.connection.execute(
