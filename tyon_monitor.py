@@ -1384,6 +1384,8 @@ def main() -> int:
         raise SystemExit("--start-delay cannot be negative")
     if args.raw and args.trial not in ("paddle", "neutral") and not args.list:
         parser.error("--raw only supports paddle or neutral trials")
+    if args.raw and args.trial == "paddle" and args.duration and args.duration <= args.baseline_seconds:
+        parser.error("--raw paddle --duration must exceed --baseline-seconds so an action phase remains")
     try:
         if args.list:
             return run_monitor(args)

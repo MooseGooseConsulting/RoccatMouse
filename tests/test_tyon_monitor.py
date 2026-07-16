@@ -198,6 +198,18 @@ class CaptureRequestTests(unittest.TestCase):
 
         run_raw_monitor.assert_not_called()
 
+    @patch("tyon_monitor.run_raw_monitor")
+    def test_raw_paddle_duration_must_leave_time_for_action(self, run_raw_monitor):
+        with patch.object(
+            sys,
+            "argv",
+            ["tyon_monitor.py", "--raw", "--trial", "paddle", "--duration", "2", "--baseline-seconds", "2"],
+        ):
+            with self.assertRaises(SystemExit):
+                main()
+
+        run_raw_monitor.assert_not_called()
+
 
 class AxisStatsTests(unittest.TestCase):
     def test_tracks_away_run_and_return(self):
