@@ -104,6 +104,80 @@ class Harness:
 
 
 class DiagnosticRuntimeTests(unittest.TestCase):
+    def test_normal_start_accepts_synchronous_event_for_pending_session(self):
+        h = Harness(); seen = []; reentered = threading.Event()
+        class EmittingNormal(Normal):
+            def start(self, emit):
+                super().start(emit)
+                stamp = h.clock.now()
+                emit(TelemetryEvent(session_id, stamp, "raw_input", "wheel", Phase.ACTION,
+                                    {"delta": 120, "direction": "up"}))
+        session_id = "normal-pending"
+        runtime = DiagnosticRuntime(clock=h.clock, normal_factory=lambda *_: EmittingNormal(h.calls),
+                                    raw_factory=h.raw_factory, session_id_factory=lambda: session_id)
+        def listener(event):
+            seen.append(event)
+            worker = threading.Thread(target=lambda: (runtime.status(), reentered.set()))
+            worker.start(); worker.join(timeout=.5)
+        runtime.add_event_listener(listener)
+        runtime.start_normal()
+        self.assertEqual([event.session_id for event in seen], [session_id])
+        self.assertTrue(reentered.is_set())
+        self.assertNotIn("wrong-session", runtime.status().error or "")
+
+    def test_listener_runs_after_lock_release_and_can_reenter_across_thread(self):
+        h = Harness(); runtime = h.runtime(); completed = threading.Event()
+        callback_thread = []; lifecycle_thread = []
+        def listener(event):
+            callback_thread.append(threading.get_ident())
+            def stop_from_worker():
+                lifecycle_thread.append(threading.get_ident())
+                runtime.stop_raw()
+                completed.set()
+            worker = threading.Thread(target=stop_from_worker)
+            worker.start(); worker.join(timeout=.5)
+        runtime.add_event_listener(listener)
+        sid = runtime.start_raw(); source_thread = threading.get_ident()
+        event = TelemetryEvent(sid, h.clock.now(), "raw_accelerator", "raw_accelerator",
+                               Phase.ACTION, {"value": 100})
+        h.bundles[0].accelerator_source.emit(event)
+        self.assertTrue(completed.is_set())
+        self.assertEqual(callback_thread, [source_thread])
+        self.assertNotEqual(lifecycle_thread, [source_thread])
+        self.assertEqual(runtime.status().mode, RuntimeMode.STOPPED)
+
+    def test_pre_lifecycle_close_failure_recovers_by_retrying_close_directly(self):
+        h = Harness(); close_attempts = []
+        def close():
+            close_attempts.append("close")
+            if len(close_attempts) == 1: raise RuntimeError("close failed")
+        def factory(session_id, clock, phase):
+            return RawAdapterBundle(h.identity, Control(h.fingerprints), Lifecycle(h.calls),
+                                    Source(h.calls, "raw"), Source(h.calls, "input", fail_start=True), close)
+        runtime = DiagnosticRuntime(clock=h.clock, normal_factory=h.normal_factory, raw_factory=factory)
+        normal_id = runtime.start_normal()
+        with self.assertRaisesRegex(RuntimeError, "input start failed"): runtime.start_raw()
+        self.assertEqual(runtime.status().mode, RuntimeMode.RECOVERING)
+        self.assertTrue(runtime.recover())
+        self.assertEqual(runtime.status().mode, RuntimeMode.NORMAL)
+        self.assertEqual(runtime.status().session_id, normal_id)
+        self.assertNotIn("lifecycle.recover", h.calls)
+        self.assertEqual(close_attempts, ["close", "close"])
+
+    def test_stop_raw_releases_lock_before_joining_monitor(self):
+        h = Harness(); runtime = h.runtime(); runtime.start_raw(); acquired = threading.Event()
+        class Monitor:
+            def join(self, timeout=None):
+                worker = threading.Thread(target=lambda: (runtime.status(), acquired.set()))
+                worker.start(); worker.join(timeout=.5)
+            def is_alive(self): return False
+        runtime._monitor_stop.set()
+        old = runtime._monitor_thread
+        if old is not None: old.join(timeout=.5)
+        runtime._monitor_thread = Monitor()
+        runtime.stop_raw()
+        self.assertTrue(acquired.is_set(), "stop_raw held the runtime lock while joining monitor")
+
     def test_stop_close_failure_stays_recovering_until_close_retry_then_resumes_normal(self):
         h = Harness(); attempts = []
         def close():

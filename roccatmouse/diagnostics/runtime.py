@@ -105,6 +105,7 @@ class DiagnosticRuntime:
         self._baseline: int | None = None
         self._before_fingerprint = None
         self._raw_lifecycle_clean = False
+        self._raw_lifecycle_required = False
         self._errors: list[str] = []
         self._event_buffer: dict[int, TelemetryEvent] = {}
         self._expected_sequence: int | None = None
@@ -116,6 +117,8 @@ class DiagnosticRuntime:
         self._status_listeners: list[StatusListener] = []
         self._snapshot_listeners: list[SnapshotListener] = []
         self._event_listeners: list[EventListener] = []
+        self._listener_deferral = 0
+        self._deferred_events: list[TelemetryEvent] = []
         self._monitor_stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
         self._closed = False
@@ -175,7 +178,10 @@ class DiagnosticRuntime:
     def _consume_clock_stamp(self):
         stamp = self._clock.now()
         self._ignored_sequences.add(stamp.sequence)
-        self._drain_ordered(final=False)
+        if self._expected_sequence is not None:
+            while self._expected_sequence in self._ignored_sequences:
+                self._ignored_sequences.remove(self._expected_sequence)
+                self._expected_sequence += 1
         return stamp
 
     def snapshot(self) -> DiagnosticSnapshot:
@@ -213,22 +219,28 @@ class DiagnosticRuntime:
             normal = None
             try:
                 normal = self._normal_factory(session_id, self._clock)
-                normal.start(self._receive_event)
+                self._normal_id, self._normal = session_id, normal
             except BaseException as start_error:
-                cleanup_errors = []
-                if normal is not None:
-                    for label, cleanup in (("normal stop", normal.stop), ("normal close", normal.close)):
-                        try:
-                            cleanup()
-                        except BaseException as exc:
-                            cleanup_errors.append(f"{label} failed: {exc}")
                 self._arbiter.release_normal(session_id)
-                if cleanup_errors:
-                    raise RuntimeError(
-                        f"{start_error}; cleanup failures: {'; '.join(cleanup_errors)}"
-                    ) from start_error
+                self._normal_id, self._normal = None, None
                 raise
-            self._normal_id, self._normal = session_id, normal
+        try:
+            normal.start(self._receive_event)
+        except BaseException as start_error:
+            cleanup_errors = []
+            for label, cleanup in (("normal stop", normal.stop), ("normal close", normal.close)):
+                try:
+                    cleanup()
+                except BaseException as exc:
+                    cleanup_errors.append(f"{label} failed: {exc}")
+            with self._lock:
+                self._arbiter.release_normal(session_id)
+                self._normal_id, self._normal = None, None
+            if cleanup_errors:
+                raise RuntimeError(
+                    f"{start_error}; cleanup failures: {'; '.join(cleanup_errors)}"
+                ) from start_error
+            raise
         self._notify_status()
         return session_id
 
@@ -291,26 +303,33 @@ class DiagnosticRuntime:
             raise
 
     def _resume_normal(self) -> None:
-        if self._normal_id is None or self._normal_factory is None:
-            return
+        with self._lock:
+            if self._normal_id is None or self._normal_factory is None:
+                return
+            normal_id = self._normal_id
+            normal_factory = self._normal_factory
         normal = None
         try:
-            normal = self._normal_factory(self._normal_id, self._clock)
+            normal = normal_factory(normal_id, self._clock)
+            with self._lock:
+                self._normal = normal
             normal.start(self._receive_event)
-            self._normal = normal
         except BaseException as exc:
-            self._record_error(f"normal observation resume failed: {exc}")
+            with self._lock:
+                self._record_error(f"normal observation resume failed: {exc}")
             if normal is not None:
                 for label, cleanup in (("normal stop", normal.stop), ("normal close", normal.close)):
                     try:
                         cleanup()
                     except BaseException as cleanup_exc:
-                        self._record_error(f"normal resume {label} failed: {cleanup_exc}")
-            try:
-                self._arbiter.release_normal(self._normal_id)
-            finally:
-                self._normal = None
-                self._normal_id = None
+                        with self._lock:
+                            self._record_error(f"normal resume {label} failed: {cleanup_exc}")
+            with self._lock:
+                try:
+                    self._arbiter.release_normal(normal_id)
+                finally:
+                    self._normal = None
+                    self._normal_id = None
 
     def start_raw(
         self, mode: RuntimeMode = RuntimeMode.LIVE_RAW, *, arithmetic_baseline: int | None = None
@@ -319,6 +338,7 @@ class DiagnosticRuntime:
             raise ValueError("raw mode must be qualifying or live_raw")
         if arithmetic_baseline is not None and not 0 <= arithmetic_baseline <= 255:
             raise ValueError("arithmetic_baseline must be in 0..255")
+        pending_notifications = []
         with self._lock:
             if self._closed:
                 raise RuntimeError("diagnostic runtime is closed")
@@ -333,9 +353,11 @@ class DiagnosticRuntime:
             self._phase = Phase.PREPARATION
             self._baseline = arithmetic_baseline
             self._raw_lifecycle_clean = False
+            self._raw_lifecycle_required = False
             self._latest_raw_event = self._previous_raw_event = None
             self._latest_windows_output = None
             self._event_buffer.clear(); self._ignored_sequences.clear()
+            self._listener_deferral += 1
             start_stamp = self._clock.now()
             self._expected_sequence = start_stamp.sequence + 1
             bundle = None
@@ -348,6 +370,7 @@ class DiagnosticRuntime:
                 input_owned = True
                 bundle.input_source.start(self._receive_event)
                 lifecycle_owned = True
+                self._raw_lifecycle_required = True
                 bundle.lifecycle.start()
                 raw_owned = True
                 bundle.accelerator_source.start(self._receive_event)
@@ -379,12 +402,18 @@ class DiagnosticRuntime:
                 if cleanup_verified:
                     self._raw = None; self._raw_id = None
                     self._raw_lifecycle_clean = False
+                    self._raw_lifecycle_required = False
                     if normal_id is not None: self._resume_normal()
                 else:
                     detail = f": {'; '.join(cleanup_errors)}" if cleanup_errors else ""
                     self._record_error(f"raw start rollback cleanup unverified: {start_error}{detail}")
+                self._listener_deferral -= 1
+                self._deferred_events.clear()
                 raise
             self._start_monitor()
+            self._listener_deferral -= 1
+            pending_notifications, self._deferred_events = self._deferred_events, []
+        self._dispatch_events(pending_notifications)
         self._notify_status(); self._notify_snapshot()
         return raw_id
 
@@ -435,18 +464,31 @@ class DiagnosticRuntime:
                 if self._arbiter.mode not in self._RAW_MODES:
                     return
 
-    def _stop_monitor(self) -> None:
+    def _detach_monitor_locked(self) -> threading.Thread | None:
         self._monitor_stop.set()
         thread, self._monitor_thread = self._monitor_thread, None
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=max(1.0, self._monitor_interval * 4))
+        return thread
+
+    def _join_monitor(self, thread: threading.Thread | None) -> None:
+        if thread is None or thread is threading.current_thread():
+            return
+        thread.join(timeout=max(1.0, self._monitor_interval * 4))
+        if thread.is_alive():
+            raise RuntimeError("diagnostic health monitor did not stop")
 
     def stop_raw(self) -> bool:
         with self._lock:
             if self._arbiter.mode not in self._RAW_MODES or self._raw is None or self._raw_id is None:
                 raise RuntimeError("raw diagnostics are not active")
-            self._stop_monitor()
+            if self._phase is Phase.STOPPING:
+                raise RuntimeError("raw diagnostics are already stopping")
             self._phase = Phase.STOPPING
+            monitor = self._detach_monitor_locked()
+            stopping_id = self._raw_id
+        self._join_monitor(monitor)
+        with self._lock:
+            if self._raw_id != stopping_id or self._raw is None:
+                raise RuntimeError("raw diagnostics changed while stopping")
             bundle, raw_id = self._raw, self._raw_id
             cleanup_verified = True
             failures = []
@@ -461,7 +503,7 @@ class DiagnosticRuntime:
                 cleanup_verified = lifecycle_clean and cleanup_verified
             except BaseException as exc:
                 cleanup_verified = False; failures.append(f"raw lifecycle: {exc}")
-            self._drain_ordered(final=True)
+            delivered = self._drain_ordered(final=True)
             if cleanup_verified:
                 self._check_fingerprint(bundle)
                 try:
@@ -472,13 +514,16 @@ class DiagnosticRuntime:
             if cleanup_verified:
                 self._raw = None; self._raw_id = None
                 self._raw_lifecycle_clean = False
+                self._raw_lifecycle_required = False
                 self._stream_health = RawStreamHealth.STOPPED.value
             if not cleanup_verified:
                 self._record_error("raw cleanup unverified" + (": " + ", ".join(failures) if failures else ""))
             self._arbiter.release_raw(raw_id, cleanup_verified=cleanup_verified)
             self._phase = Phase.NONE if cleanup_verified else Phase.STOPPING
-            if cleanup_verified and self._arbiter.mode is RuntimeMode.NORMAL:
-                self._resume_normal()
+            resume_normal = cleanup_verified and self._arbiter.mode is RuntimeMode.NORMAL
+        self._dispatch_events(delivered)
+        if resume_normal:
+            self._resume_normal()
         self._notify_status(); self._notify_snapshot()
         return cleanup_verified
 
@@ -491,6 +536,7 @@ class DiagnosticRuntime:
             self._record_error(f"post-raw fingerprint failed: {exc}")
 
     def recover(self) -> bool:
+        result = False
         with self._lock:
             if self._arbiter.mode is not RuntimeMode.RECOVERING or self._raw is None or self._raw_id is None:
                 raise RuntimeError("raw recovery is not pending")
@@ -502,34 +548,39 @@ class DiagnosticRuntime:
                 except BaseException as exc:
                     verified = False
                     self._record_error(f"raw recovery {label} stop failed: {exc}")
-            if verified and not self._raw_lifecycle_clean:
+            if verified and self._raw_lifecycle_required and not self._raw_lifecycle_clean:
                 try:
                     self._raw_lifecycle_clean = bool(self._raw.lifecycle.recover())
                     verified = self._raw_lifecycle_clean
                 except BaseException as exc:
                     verified = False; self._record_error(f"raw recovery failed: {exc}")
-            if not verified:
-                self._notify_status()
-                return False
-            self._check_fingerprint(self._raw)
-            try:
-                self._raw.close()
-            except BaseException as exc:
-                self._record_error(f"raw recovery adapter close failed: {exc}")
-                self._notify_status()
-                return False
-            raw_id = self._raw_id
-            self._raw = None; self._raw_id = None
-            self._raw_lifecycle_clean = False
-            self._stream_health = RawStreamHealth.STOPPED.value
-            self._arbiter.recover(raw_id, cleanup_verified=True)
-            self._phase = Phase.NONE
-            if self._arbiter.mode is RuntimeMode.NORMAL:
-                self._resume_normal()
+            if verified:
+                self._check_fingerprint(self._raw)
+                try:
+                    self._raw.close()
+                except BaseException as exc:
+                    self._record_error(f"raw recovery adapter close failed: {exc}")
+                else:
+                    raw_id = self._raw_id
+                    self._raw = None; self._raw_id = None
+                    self._raw_lifecycle_clean = False
+                    self._raw_lifecycle_required = False
+                    self._stream_health = RawStreamHealth.STOPPED.value
+                    self._arbiter.recover(raw_id, cleanup_verified=True)
+                    self._phase = Phase.NONE
+                    resume_normal = self._arbiter.mode is RuntimeMode.NORMAL
+                    result = True
+                if not result:
+                    resume_normal = False
+            else:
+                resume_normal = False
+        if resume_normal:
+            self._resume_normal()
         self._notify_status(); self._notify_snapshot()
-        return True
+        return result
 
     def _receive_event(self, event: TelemetryEvent) -> None:
+        delivered = []
         with self._lock:
             active = self._raw_id if self._arbiter.mode in self._RAW_MODES else self._normal_id
             if event.session_id != active:
@@ -544,11 +595,12 @@ class DiagnosticRuntime:
                 self._record_error(f"duplicate or late sequence {sequence} rejected")
                 return
             self._event_buffer[sequence] = event
-            self._drain_ordered(final=False)
+            delivered = self._drain_ordered(final=False)
+        self._dispatch_events(delivered)
 
-    def _drain_ordered(self, *, final: bool) -> None:
+    def _drain_ordered(self, *, final: bool) -> list[TelemetryEvent]:
         if self._expected_sequence is None:
-            return
+            return []
         delivered = []
         while True:
             while self._expected_sequence in self._ignored_sequences:
@@ -565,13 +617,23 @@ class DiagnosticRuntime:
                 delivered.append(self._event_buffer[sequence])
             self._event_buffer.clear()
             self._expected_sequence = delivered[-1].timestamp.sequence + 1
-        listeners = tuple(self._event_listeners)
-        snapshot_listeners = tuple(self._snapshot_listeners)
         for event in delivered:
             self._apply_measured_event(event)
+        return delivered
+
+    def _dispatch_events(self, delivered: list[TelemetryEvent]) -> None:
+        with self._lock:
+            if self._listener_deferral:
+                self._deferred_events.extend(delivered)
+                return
+        for event in delivered:
+            with self._lock:
+                listeners = tuple(self._event_listeners)
+                snapshot_listeners = tuple(self._snapshot_listeners)
             self._call_listeners(listeners, event)
             if snapshot_listeners:
-                self._call_listeners(snapshot_listeners, self.snapshot())
+                value = self.snapshot()
+                self._call_listeners(snapshot_listeners, value)
 
     def _apply_measured_event(self, event: TelemetryEvent) -> None:
         if event.kind == "raw_accelerator" and isinstance(event.payload.get("value"), int):
@@ -605,13 +667,18 @@ class DiagnosticRuntime:
     def close(self) -> None:
         with self._lock:
             if self._closed: return
-            if self._arbiter.mode in self._RAW_MODES:
-                self.stop_raw()
-            if self._arbiter.mode is RuntimeMode.RECOVERING:
-                self.recover()
-            if self._arbiter.mode is RuntimeMode.NORMAL:
-                self.stop_normal()
             self._closed = True
+            mode = self._arbiter.mode
+        if mode in self._RAW_MODES:
+            self.stop_raw()
+        with self._lock:
+            mode = self._arbiter.mode
+        if mode is RuntimeMode.RECOVERING:
+            self.recover()
+        with self._lock:
+            mode = self._arbiter.mode
+        if mode is RuntimeMode.NORMAL:
+            self.stop_normal()
 
 
 __all__ = [
