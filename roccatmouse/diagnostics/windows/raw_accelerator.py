@@ -12,7 +12,7 @@ import time
 from typing import Callable
 
 from ..contracts import Clock, EventEmitter
-from ..models import Phase, TelemetryEvent
+from ..models import Phase, RawStreamHealth, TelemetryEvent
 
 REPORT_ID_INFO = 0x09
 INFO_SIZE = 0x08
@@ -20,14 +20,6 @@ XCAL_START = 0x08
 XCAL_END = 0x0A
 SPECIAL_REPORT_ID = 0x03
 SPECIAL_TYPE_XCAL = 0xE0
-
-
-class RawStreamHealth(str, Enum):
-    STOPPED = "stopped"
-    STARTING = "starting"
-    HEALTHY = "healthy"
-    STALE = "stale"
-    ERROR = "error"
 
 
 class _RawLifecycleState(str, Enum):

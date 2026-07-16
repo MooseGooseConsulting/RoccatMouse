@@ -32,6 +32,16 @@ class RuntimeMode(str, Enum):
     ERROR = "error"
 
 
+class RawStreamHealth(str, Enum):
+    """Platform-neutral health vocabulary for a raw measurement stream."""
+
+    STOPPED = "stopped"
+    STARTING = "starting"
+    HEALTHY = "healthy"
+    STALE = "stale"
+    ERROR = "error"
+
+
 class SessionState(str, Enum):
     CREATED = "created"
     PREPARING = "preparing"
