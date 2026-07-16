@@ -17,10 +17,20 @@ from tyon_monitor import CaptureProgress, CaptureRequest, CaptureResult, run_cap
 from tyon_widgets import apply_theme
 
 
+def capture_status(result: CaptureResult) -> str:
+    if result.cancelled:
+        return "Capture stopped."
+    if result.exit_code != 0:
+        return f"Capture failed (exit code {result.exit_code})."
+    return "Capture complete."
+
+
 def format_summary(result: CaptureResult) -> str:
     """Return the concise, human-readable completion card shown by the window."""
     if result.cancelled:
         return "Capture stopped. No result summary was produced."
+    if result.exit_code != 0:
+        return f"{capture_status(result)}\nSaved: {result.output.resolve()}"
     if result.request.raw:
         data = result.summary
         low, high = data.get("raw_range", ("?", "?"))
@@ -158,7 +168,7 @@ class CaptureWindow(QMainWindow):
 
     @Slot(object)
     def on_completed(self, result: CaptureResult) -> None:
-        self.status.setText("Capture stopped." if result.cancelled else "Capture complete.")
+        self.status.setText(capture_status(result))
         self.summary.setText(format_summary(result))
 
     @Slot(str)

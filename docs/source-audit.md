@@ -63,4 +63,3 @@ paddle and wheel captures without writing calibration values. The immediate
 foundation work is therefore lifecycle safety: mark entry into raw streaming,
 always attempt the matching end command, retain evidence when cleanup fails,
 and recover a stale marker before starting another capture.
-

@@ -67,4 +67,3 @@ command before sending start. Do not delete the marker to hide a failed cleanup.
 After all trials, read all five profiles again and compare them byte-for-byte
 or field-for-field with the pre-test output. RGB, DPI, polling, button, macro,
 and game-profile configuration must be unchanged.
-

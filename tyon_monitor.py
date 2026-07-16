@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import ctypes
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -49,8 +49,12 @@ class CaptureRequest:
     def __post_init__(self) -> None:
         if self.trial not in ("paddle", "wheel"):
             raise ValueError("trial must be 'paddle' or 'wheel'")
-        if min(self.start_delay_seconds, self.baseline_seconds, self.action_seconds) < 0:
-            raise ValueError("capture timings cannot be negative")
+        if self.start_delay_seconds < 0:
+            raise ValueError("start delay cannot be negative")
+        if self.baseline_seconds <= 0:
+            raise ValueError("baseline duration must be positive")
+        if self.action_seconds <= 0:
+            raise ValueError("action duration must be positive")
 
     @property
     def raw(self) -> bool:
@@ -85,6 +89,25 @@ def monitor_args_for_request(request: CaptureRequest, output: str) -> argparse.N
         verbose=False,
         list=False,
     )
+
+
+def baseline_progress_message(seconds: float) -> str:
+    return f"Leave the wheel and paddle untouched for {seconds:g} seconds."
+
+
+def action_progress_message(args: argparse.Namespace) -> str:
+    if args.trial == "wheel":
+        action_seconds = args.duration if args.duration else None
+        control = "physical wheel up and down"
+    else:
+        action_seconds = (
+            max(0.0, args.duration - args.baseline_seconds)
+            if args.raw and args.duration
+            else args.duration or None
+        )
+        control = "X-Celerator paddle up and down"
+    duration = f" for {action_seconds:g} seconds" if action_seconds is not None else " until stopped"
+    return f"Move ONLY the {control}{duration}."
 
 
 @dataclass(frozen=True)
@@ -420,14 +443,20 @@ class RawModeLifecycle:
         self.verbose = verbose
         self.active = False
 
-    def _send(self, function: int, label: str) -> None:
-        self.check_write(self.device, verbose=self.verbose)
+    def _send(self, function: int, label: str, *, cleanup: bool = False) -> None:
+        try:
+            self.check_write(self.device, verbose=self.verbose)
+        except Exception:
+            if not cleanup:
+                raise
         self.write_feature(
             self.device,
             xcal_command(function),
             label,
             self.verbose,
         )
+        if cleanup:
+            self.check_write(self.device, verbose=self.verbose)
 
     def _write_marker(self) -> None:
         self.marker_path.parent.mkdir(parents=True, exist_ok=True)
@@ -447,7 +476,7 @@ class RawModeLifecycle:
         """End a possibly active prior session before starting another."""
         if not self.marker_path.exists():
             return False
-        self._send(XCAL_END, "X-Celerator raw stream recovery end")
+        self._send(XCAL_END, "X-Celerator raw stream recovery end", cleanup=True)
         self.marker_path.unlink(missing_ok=True)
         self.active = False
         return True
@@ -469,7 +498,7 @@ class RawModeLifecycle:
     def stop(self) -> bool:
         if not self.active and not self.marker_path.exists():
             return False
-        self._send(XCAL_END, "X-Celerator raw stream end")
+        self._send(XCAL_END, "X-Celerator raw stream end", cleanup=True)
         self.marker_path.unlink(missing_ok=True)
         self.active = False
         return True
@@ -598,7 +627,7 @@ def run_monitor(
         f"Keep the paddle untouched for the {args.baseline_seconds:g}s baseline...",
         flush=True,
     )
-    _progress(on_progress, "baseline", "Leave the wheel and paddle untouched for 2 seconds.")
+    _progress(on_progress, "baseline", baseline_progress_message(args.baseline_seconds))
     baseline, baseline_samples = collect_baseline(
         read, args.baseline_seconds, args.poll_hz
     )
@@ -655,8 +684,7 @@ def run_monitor(
     _progress(
         on_progress,
         "action",
-        "Move ONLY the physical wheel up and down." if args.trial == "wheel"
-        else "Move and release ONLY the X-Celerator paddle.",
+        action_progress_message(args),
     )
     try:
         with path.open("w", newline="", encoding="utf-8") as handle:
@@ -825,7 +853,7 @@ def run_raw_monitor(
             f"Leave the paddle untouched for {args.baseline_seconds:g}s, then move and release it. "
             "Press Ctrl+C to stop."
         )
-        _progress(on_progress, "baseline", "Leave the paddle untouched for 2 seconds.")
+        _progress(on_progress, "baseline", baseline_progress_message(args.baseline_seconds))
         if not args.no_scroll_events:
             warning = capture.start()
             if warning:
@@ -857,8 +885,9 @@ def run_raw_monitor(
                                   f"scroll={scroll_events:4d}", end="", flush=True)
                             next_display = now + 1.0 / args.display_hz
                 if not action_announced and now - started >= args.baseline_seconds:
-                    print("\nGO: use ONLY the X-Celerator paddle up/down for 10 seconds.")
-                    _progress(on_progress, "action", "Move ONLY the X-Celerator paddle up and down.")
+                    instruction = action_progress_message(args)
+                    print(f"\nGO: {instruction}")
+                    _progress(on_progress, "action", instruction)
                     action_announced = True
                 for timestamp, x, y, dx, dy in capture.drain():
                     scroll_events += 1
@@ -985,7 +1014,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
     if args.poll_hz <= 0 or args.display_hz <= 0:
         raise SystemExit("--poll-hz and --display-hz must be positive")
     if args.baseline_seconds <= 0:
@@ -994,7 +1024,11 @@ def main() -> int:
         raise SystemExit("--duration cannot be negative")
     if args.start_delay < 0:
         raise SystemExit("--start-delay cannot be negative")
+    if args.raw and args.trial != "paddle" and not args.list:
+        parser.error("--raw only supports --trial paddle")
     try:
+        if args.list:
+            return run_monitor(args)
         return run_raw_monitor(args) if args.raw else run_monitor(args)
     except (OSError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

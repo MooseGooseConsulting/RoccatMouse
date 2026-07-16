@@ -1,4 +1,5 @@
 import unittest
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -8,10 +9,13 @@ from tyon_monitor import (
     CaptureRequest,
     JoystickInfo,
     RawModeLifecycle,
+    action_progress_message,
+    baseline_progress_message,
     choose_device,
     parse_xcelerator_report,
     monitor_args_for_request,
     run_capture,
+    main,
     xcal_command,
 )
 
@@ -32,6 +36,14 @@ class CaptureRequestTests(unittest.TestCase):
     def test_request_rejects_unknown_trial(self):
         with self.assertRaises(ValueError):
             CaptureRequest("trackball")
+
+    def test_request_rejects_zero_baseline(self):
+        with self.assertRaises(ValueError):
+            CaptureRequest("wheel", baseline_seconds=0)
+
+    def test_request_rejects_zero_action_duration(self):
+        with self.assertRaises(ValueError):
+            CaptureRequest("wheel", action_seconds=0)
 
     def test_request_builds_raw_paddle_arguments(self):
         args = monitor_args_for_request(CaptureRequest("paddle"), "paddle.csv")
@@ -66,6 +78,36 @@ class CaptureRequestTests(unittest.TestCase):
         self.assertEqual(result.output, Path("captures/tyon-xcelerator-raw-base.csv"))
         self.assertEqual(result.exit_code, 3)
         run_raw_monitor.assert_called_once()
+
+    def test_progress_messages_reflect_configured_timings(self):
+        args = monitor_args_for_request(
+            CaptureRequest("paddle", baseline_seconds=0.2, action_seconds=0.8),
+            "paddle.csv",
+        )
+
+        self.assertIn("0.2 seconds", baseline_progress_message(args.baseline_seconds))
+        self.assertIn("0.8 seconds", action_progress_message(args))
+
+    @patch("tyon_monitor.run_raw_monitor")
+    @patch("tyon_monitor.run_monitor", return_value=0)
+    def test_list_uses_read_only_runner_even_with_raw_flag(self, run_monitor, run_raw_monitor):
+        with patch.object(sys, "argv", ["tyon_monitor.py", "--raw", "--list"]):
+            self.assertEqual(main(), 0)
+
+        run_monitor.assert_called_once()
+        run_raw_monitor.assert_not_called()
+
+    @patch("tyon_monitor.run_raw_monitor")
+    def test_raw_mode_rejects_wheel_trial_label(self, run_raw_monitor):
+        with patch.object(
+            sys,
+            "argv",
+            ["tyon_monitor.py", "--raw", "--trial", "wheel", "--duration", "1"],
+        ):
+            with self.assertRaises(SystemExit):
+                main()
+
+        run_raw_monitor.assert_not_called()
 
 
 class AxisStatsTests(unittest.TestCase):
@@ -196,6 +238,34 @@ class RawModeLifecycleTests(unittest.TestCase):
 
             with self.assertRaises(OSError):
                 lifecycle.start()
+
+            self.assertEqual(commands, [0x08, 0x0A])
+            self.assertFalse(marker.exists())
+
+    def test_stop_sends_end_even_when_prior_status_check_fails(self):
+        with TemporaryDirectory() as directory:
+            marker = Path(directory) / "raw-mode-active.json"
+            commands = []
+            checks = 0
+
+            def check_write(device, verbose=False):
+                nonlocal checks
+                checks += 1
+                if checks == 2:
+                    raise OSError("simulated stale start status")
+
+            def write_feature(device, packet, label, verbose=False):
+                commands.append(packet[2])
+
+            lifecycle = RawModeLifecycle(
+                device=object(),
+                marker_path=marker,
+                check_write=check_write,
+                write_feature=write_feature,
+            )
+            lifecycle.start()
+
+            lifecycle.stop()
 
             self.assertEqual(commands, [0x08, 0x0A])
             self.assertFalse(marker.exists())
