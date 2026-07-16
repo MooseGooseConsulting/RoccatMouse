@@ -1,5 +1,7 @@
 # Controlled Capture Foundation Implementation Plan
 
+- **Status:** Completed in PR #1 (`a38f1d6`)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Finish the Windows-first source audit and make controlled paddle/wheel capture recover safely from cancellation, exceptions, and an unclean prior raw-mode session.
