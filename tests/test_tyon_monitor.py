@@ -61,6 +61,16 @@ class CaptureRequestTests(unittest.TestCase):
         self.assertFalse(request.raw)
         self.assertEqual(request.monitor_duration, 10.0)
 
+    def test_guided_paddle_request_uses_normal_mode_and_normalized_label(self):
+        request = CaptureRequest("paddle_only")
+
+        self.assertFalse(request.raw)
+        self.assertEqual(request.label.value, "paddle_only")
+
+    def test_legacy_labels_normalize_without_breaking_launchers(self):
+        self.assertEqual(CaptureRequest("paddle").label.value, "paddle_only")
+        self.assertEqual(CaptureRequest("wheel").label.value, "wheel_only")
+
     def test_request_rejects_unknown_trial(self):
         with self.assertRaises(ValueError):
             CaptureRequest("trackball")

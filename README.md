@@ -153,33 +153,39 @@ CLI (lighting + diagnostics):
 
 `rgb.bat --help` lists every flag.
 
-### X-Celerator signal monitor
+### X-Celerator diagnostics
 
-`monitor.bat` records the paddle's Windows joystick axes without sending any
-feature or output reports to the mouse. It also correlates global scroll events
-when `pynput` is available, which helps distinguish sensor/centering drift from
-the profile's scroll action.
+The diagnostics page and `monitor.bat` support three complementary controlled
+captures. **Raw paddle sensor** temporarily exposes the 0..255 calibration
+stream. **Paddle scrolling** and **physical wheel** remain in normal device mode
+and record full-rate WinMM axes, MI_03 special reports, and device-attributed
+Win32 Raw Input movement, buttons, and wheel deltas. Every event receives a
+session ID, trial/phase label, QPC monotonic timestamp, UTC timestamp, and strict
+sequence number. A symptom button adds a timestamped operator note.
 
-Scroll rows contain wheel deltas only. `pynput` also provides the pointer's
-screen coordinates to its callback, but those values are not cursor movement
-and are deliberately excluded: cursor motion is not part of the
-paddle-to-scroll signal chain.
+The normal capture fingerprints all five profile-settings and button-map
+reports before and after the trial. It does not write device configuration.
+Scroll rows contain wheel deltas only: cursor position is deliberately excluded
+because cursor motion is not part of the paddle-to-scroll signal chain.
 
 ```pwsh
 .\monitor.bat --list                         # show readable joystick slots
-.\monitor.bat --duration 30                  # 30-second diagnostic capture
+.\monitor.bat --trial paddle_only --duration 30  # normal paddle-scroll trial
+.\monitor.bat --trial wheel_only --duration 30   # normal physical-wheel trial
+.\monitor.bat --trial symptom_reproduction       # normal use with symptom markers
 .\monitor.bat --device 0                     # select a slot when several exist
 .\monitor.bat --raw --duration 30            # temporary raw 0..255 sensor stream
-.\capture-paddle.bat                         # opens compact capture window, paddle selected
-.\capture-wheel.bat                          # opens compact capture window, wheel selected
+.\capture-paddle.bat                         # compact raw-paddle window (legacy shortcut)
+.\capture-wheel.bat                          # compact physical-wheel window
+.\capture-gui.bat                            # choose raw paddle, paddle scroll, or wheel
 ```
 
 The compact window gives a one-second warning, then records a two-second
-untouched baseline followed by a ten-second controlled trial. Both launchers
-open the same window, so you can switch between paddle and wheel tests before
-starting. Captures are written to timestamped CSV files under `captures\`;
-avoid using the wheel during a correlated paddle test because Windows scroll
-events do not identify which physical control produced them.
+untouched baseline followed by a ten-second controlled trial. Captures are
+written to timestamped CSV files under `captures\`. During normal trials, add a
+note and press **Mark symptom now** at the moment the unwanted behavior occurs.
+Use only the labelled control: Windows identifies the Tyon that sent an event,
+but not whether its physical wheel or scroll-mapped paddle produced that event.
 
 The default path is entirely read-only. Because a scroll-mapped paddle is
 converted to wheel events inside the firmware, `--raw` temporarily enters the

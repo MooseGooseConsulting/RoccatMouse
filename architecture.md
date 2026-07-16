@@ -25,8 +25,8 @@ Keep the proven Python/PySide6 Windows configurator as the product base, isolate
 |---|---|---|
 | Windows configurator | Current | RGB, DPI, polling, profiles, buttons, macros, and per-game behavior through the existing Telephony HID route. |
 | Controlled capture | Current | Bounded paddle and wheel trials, WinMM axes, MI_03 reports, scroll deltas, raw-mode recovery, CSV export, and compact GUI. |
-| Platform contracts | Planned | `DeviceControl`, `AcceleratorSource`, `InputEventSource`, `TelemetryStore`, `CaptureSession`, and `AnalysisEngine` boundaries. |
-| Normal-mode trial engine | Planned | Guided neutral, paddle-only, wheel-only, and symptom-reproduction phases without entering raw calibration mode. |
+| Platform contracts | Current | `DeviceControl`, `AcceleratorSource`, `InputEventSource`, `TelemetrySink`, `Clock`, and `CaptureSession` boundaries; persistent store and analysis contracts arrive with their milestones. |
+| Normal-mode trial engine | Current | Guided neutral, paddle-only, wheel-only, symptom-reproduction, and general-observation phases without entering raw calibration mode. |
 | Continuous observation | Planned | On-demand tray runtime, one-second aggregates, discrete events, reconnect handling, and 30-day retention. |
 | Telemetry database | Planned | Local SQLite database in WAL mode with numbered migrations and explicit retention/export/delete behavior. |
 | Analysis dashboard | Planned | Live and historical accelerator/axis/scroll plots, anomaly markers, comparisons, and diagnosis summaries. |

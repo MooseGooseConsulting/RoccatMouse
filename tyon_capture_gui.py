@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import queue
 import sys
 import threading
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import (
-    QApplication, QLabel, QMainWindow, QMessageBox, QPushButton,
+    QApplication, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
     QVBoxLayout, QHBoxLayout, QWidget,
 )
 
@@ -45,6 +46,8 @@ def format_summary(result: CaptureResult) -> str:
     return (
         f"{data.get('samples', 0):,} samples · scroll events: {data.get('scroll_events', 0)} · "
         f"largest axis: {data.get('primary_axis', '?')} (span {data.get('primary_span', '?')})\n"
+        f"Input source: {data.get('input_source', '?')} · "
+        f"clean shutdown: {data.get('clean_shutdown', False)}\n"
         f"Saved: {result.output.resolve()}"
     )
 
@@ -58,11 +61,19 @@ class CaptureWorker(QObject):
         super().__init__()
         self.request = request
         self.stop_event = threading.Event()
+        self.marker_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
 
     @Slot()
     def run(self) -> None:
         try:
-            self.completed.emit(run_capture(self.request, self.progress.emit, self.stop_event))
+            self.completed.emit(
+                run_capture(
+                    self.request,
+                    self.progress.emit,
+                    self.stop_event,
+                    self.marker_queue,
+                )
+            )
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -70,16 +81,20 @@ class CaptureWorker(QObject):
     def stop(self) -> None:
         self.stop_event.set()
 
+    def mark_symptom(self, note: str) -> None:
+        self.marker_queue.put(note or "symptom")
+
 
 class CaptureWindow(QMainWindow):
     def __init__(self, selected_trial: str = "paddle") -> None:
         super().__init__()
         self.setWindowTitle("Roccat Tyon — Capture")
         self.setMinimumWidth(560)
-        self.setFixedHeight(360)
+        self.setFixedHeight(470)
         self._thread: QThread | None = None
         self._worker: CaptureWorker | None = None
         self._close_when_finished = False
+        self._active_request: CaptureRequest | None = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -91,22 +106,25 @@ class CaptureWindow(QMainWindow):
         title.setObjectName("h2")
         layout.addWidget(title)
         note = QLabel(
-            "Choose a trial. After a 1-second warning, keep both controls untouched for "
-            "2 seconds, then use only the selected control for 10 seconds."
+            "Choose raw sensor evidence or a normal Windows-output trial. After a 1-second "
+            "warning, keep both controls untouched for 2 seconds, then use only the selected "
+            "control for 10 seconds."
         )
         note.setObjectName("note")
         note.setWordWrap(True)
         layout.addWidget(note)
 
         buttons = QHBoxLayout()
-        self.paddle_button = QPushButton("Capture paddle")
-        self.wheel_button = QPushButton("Capture wheel")
-        for button in (self.paddle_button, self.wheel_button):
+        self.paddle_button = QPushButton("Raw paddle sensor")
+        self.normal_paddle_button = QPushButton("Paddle scrolling")
+        self.wheel_button = QPushButton("Physical wheel")
+        for button in (self.paddle_button, self.normal_paddle_button, self.wheel_button):
             button.setObjectName("primary")
             button.setMinimumHeight(46)
             buttons.addWidget(button)
         self.paddle_button.clicked.connect(lambda: self.start_capture("paddle"))
-        self.wheel_button.clicked.connect(lambda: self.start_capture("wheel"))
+        self.normal_paddle_button.clicked.connect(lambda: self.start_capture("paddle_only"))
+        self.wheel_button.clicked.connect(lambda: self.start_capture("wheel_only"))
         layout.addLayout(buttons)
 
         self.stop_button = QPushButton("Stop capture")
@@ -115,8 +133,21 @@ class CaptureWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_capture)
         layout.addWidget(self.stop_button)
 
+        marker_row = QHBoxLayout()
+        self.marker_note = QLineEdit()
+        self.marker_note.setPlaceholderText("Optional symptom note")
+        self.marker_button = QPushButton("Mark symptom now")
+        self.marker_button.setObjectName("ghost")
+        self.marker_button.setEnabled(False)
+        self.marker_button.clicked.connect(self.mark_symptom)
+        marker_row.addWidget(self.marker_note, 1)
+        marker_row.addWidget(self.marker_button)
+        layout.addLayout(marker_row)
+
         self.status = QLabel(
-            "Paddle is selected." if selected_trial == "paddle" else "Wheel is selected."
+            "Raw paddle sensor is selected."
+            if selected_trial == "paddle"
+            else "Normal Windows-output trial is selected."
         )
         self.status.setObjectName("status")
         self.status.setWordWrap(True)
@@ -128,7 +159,12 @@ class CaptureWindow(QMainWindow):
         layout.addWidget(self.summary)
         layout.addStretch(1)
 
-        selected_button = self.paddle_button if selected_trial == "paddle" else self.wheel_button
+        selected_button = {
+            "paddle": self.paddle_button,
+            "paddle_only": self.normal_paddle_button,
+            "wheel": self.wheel_button,
+            "wheel_only": self.wheel_button,
+        }.get(selected_trial, self.paddle_button)
         selected_button.setDefault(True)
         selected_button.setFocus()
 
@@ -136,11 +172,14 @@ class CaptureWindow(QMainWindow):
         if self._thread is not None:
             return
         request = CaptureRequest(trial)
+        self._active_request = request
         self.summary.clear()
         self.status.setText("Preparing capture…")
         self.paddle_button.setEnabled(False)
+        self.normal_paddle_button.setEnabled(False)
         self.wheel_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        self.marker_button.setEnabled(not request.raw)
 
         self._thread = QThread(self)
         self._worker = CaptureWorker(request)
@@ -166,6 +205,15 @@ class CaptureWindow(QMainWindow):
             self.status.setText("Stopping capture and restoring normal device mode…")
             self.stop_button.setEnabled(False)
 
+    @Slot()
+    def mark_symptom(self) -> None:
+        if self._worker is None or self._active_request is None or self._active_request.raw:
+            return
+        note = self.marker_note.text().strip() or "symptom"
+        self._worker.mark_symptom(note)
+        self.marker_note.clear()
+        self.summary.setText(f"Symptom marker recorded: {note}")
+
     @Slot(object)
     def on_completed(self, result: CaptureResult) -> None:
         self.status.setText(capture_status(result))
@@ -181,9 +229,12 @@ class CaptureWindow(QMainWindow):
     def on_thread_finished(self) -> None:
         self._thread = None
         self._worker = None
+        self._active_request = None
         self.paddle_button.setEnabled(True)
+        self.normal_paddle_button.setEnabled(True)
         self.wheel_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.marker_button.setEnabled(False)
         if self._close_when_finished:
             self._close_when_finished = False
             self.close()
@@ -199,7 +250,11 @@ class CaptureWindow(QMainWindow):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Open the compact Tyon capture window")
-    parser.add_argument("--trial", choices=("paddle", "wheel"), default="paddle")
+    parser.add_argument(
+        "--trial",
+        choices=("paddle", "wheel", "paddle_only", "wheel_only"),
+        default="paddle",
+    )
     args = parser.parse_args()
     app = QApplication(sys.argv)
     apply_theme(app)

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 import tyon_input as tinput
 import tyon_rgb as tyon
 import tyon_store as store
+from tyon_capture_gui import CaptureWindow
 from tyon_widgets import (
     COL, Card, ColorWheel, MouseDiagram, MouseGlyph, MousePhotoMap, NavButton,
     Swatch, ToggleSwitch, apply_theme, pynput_str_to_hid, qt_key_to_hid,
@@ -57,6 +58,7 @@ PAGES = [
     ("buttons", "Tasten"),
     ("macro", "Makros"),
     ("games", "Spielprofile"),
+    ("diagnostics", "Diagnose"),
 ]
 
 
@@ -1720,6 +1722,66 @@ class GamesPage(QWidget):
 #   Main window
 # ---------------------------------------------------------------------
 
+class DiagnosticsPage(QWidget):
+    """First-class entry point for controlled X-Celerator evidence capture."""
+
+    def __init__(self):
+        super().__init__()
+        self._capture_windows: list[CaptureWindow] = []
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(16)
+
+        intro = Card("X-Celerator-Diagnose")
+        explanation = QLabel(
+            "Die Diagnose trennt Sensor-Rohdaten von der normalen Windows-Ausgabe. "
+            "So wird sichtbar, ob ein Fehler am Paddle/Sensor, am Mausprofil oder an "
+            "den erzeugten Scroll-Ereignissen liegt. Cursorbewegung gehört nicht zu "
+            "dieser Signalkette."
+        )
+        explanation.setObjectName("note")
+        explanation.setWordWrap(True)
+        intro.addWidget(explanation)
+        root.addWidget(intro)
+
+        trials = Card("Kontrollierte Versuche")
+        instructions = QLabel(
+            "Jeder Versuch beginnt mit einer unberührten Baseline. Benutze danach nur "
+            "das benannte Bedienelement. Alle Daten bleiben lokal; diagnostischer "
+            "Rohmodus speichert keine Kalibrierung."
+        )
+        instructions.setObjectName("note")
+        instructions.setWordWrap(True)
+        trials.addWidget(instructions)
+        row = QHBoxLayout()
+        for label, trial in (
+            ("Raw-Sensor", "paddle"),
+            ("Paddle-Scrollen", "paddle_only"),
+            ("Physisches Rad", "wheel_only"),
+        ):
+            button = primary_button(label)
+            button.clicked.connect(lambda _checked=False, value=trial: self.open_capture(value))
+            row.addWidget(button)
+        trials.addLayout(row)
+        root.addWidget(trials)
+        root.addStretch(1)
+
+    def open_capture(self, trial: str) -> None:
+        window = CaptureWindow(trial)
+        window.setAttribute(Qt.WA_DeleteOnClose)
+        window.destroyed.connect(lambda _object=None: self._forget_window(window))
+        self._capture_windows.append(window)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _forget_window(self, window: CaptureWindow) -> None:
+        if window in self._capture_windows:
+            self._capture_windows.remove(window)
+
+    def load(self):
+        pass
+
 class TyonWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1763,6 +1825,7 @@ class TyonWindow(QMainWindow):
         self.pages["buttons"] = ButtonsPage(self.hub)
         self.pages["macro"] = MacrosPage(self.hub)
         self.pages["games"] = GamesPage(self.hub)
+        self.pages["diagnostics"] = DiagnosticsPage()
         for key, _ in PAGES:
             self.stack.addWidget(scroll_wrap(self.pages[key]))
 

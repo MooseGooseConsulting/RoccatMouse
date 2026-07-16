@@ -1,6 +1,6 @@
 # Normal-mode X-Celerator capture implementation plan
 
-- Status: Planned
+- Status: In progress — implementation and automated validation complete; controlled hardware trials remain
 - Branch: `feature/normal-mode-xcelerator-diagnostics`
 - Depends on: controlled-capture foundation and documentation authority merged to `main`
 
