@@ -23,4 +23,4 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
       - name: Compile Python sources
-        run: python -m compileall -q tyon_capture_gui.py tyon_gui.py tyon_input.py tyon_monitor.py tyon_rgb.py tyon_store.py tyon_widgets.py tests
+        run: python -m compileall -q roccatmouse tyon_capture_gui.py tyon_gui.py tyon_input.py tyon_monitor.py tyon_rgb.py tyon_store.py tyon_widgets.py tests

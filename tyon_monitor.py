@@ -22,6 +22,19 @@ import sys
 import threading
 import time
 from typing import Callable, Iterable
+import uuid
+
+from roccatmouse.diagnostics.csv_sink import CsvTelemetryWriter
+from roccatmouse.diagnostics.models import (
+    CaptureMode,
+    Phase,
+    TelemetryEvent,
+    TrialLabel,
+)
+from roccatmouse.diagnostics.session import CaptureSession
+from roccatmouse.diagnostics.windows.clock import QpcClock
+from roccatmouse.diagnostics.windows.device import TyonDeviceControl
+from roccatmouse.diagnostics.windows.raw_input import RawInputSource
 
 
 AXES = ("x", "y", "z", "r", "u", "v")
@@ -36,6 +49,14 @@ XCAL_END = 0x0A
 SPECIAL_REPORT_ID = 0x03
 SPECIAL_TYPE_XCAL = 0xE0
 
+TRIAL_ALIASES = {"paddle": TrialLabel.PADDLE_ONLY, "wheel": TrialLabel.WHEEL_ONLY}
+
+
+def normalized_trial_label(value: str) -> TrialLabel:
+    if value in TRIAL_ALIASES:
+        return TRIAL_ALIASES[value]
+    return TrialLabel(value)
+
 
 @dataclass(frozen=True)
 class CaptureRequest:
@@ -47,8 +68,16 @@ class CaptureRequest:
     action_seconds: float = 10.0
 
     def __post_init__(self) -> None:
-        if self.trial not in ("paddle", "wheel"):
-            raise ValueError("trial must be 'paddle' or 'wheel'")
+        if self.trial not in (
+            "paddle",
+            "wheel",
+            "neutral",
+            "paddle_only",
+            "wheel_only",
+            "symptom_reproduction",
+            "general_observation",
+        ):
+            raise ValueError("unsupported controlled trial label")
         if self.start_delay_seconds < 0:
             raise ValueError("start delay cannot be negative")
         if self.baseline_seconds <= 0:
@@ -59,6 +88,10 @@ class CaptureRequest:
     @property
     def raw(self) -> bool:
         return self.trial == "paddle"
+
+    @property
+    def label(self) -> TrialLabel:
+        return normalized_trial_label(self.trial)
 
     @property
     def monitor_duration(self) -> float:
@@ -96,7 +129,13 @@ def baseline_progress_message(seconds: float) -> str:
 
 
 def action_progress_message(args: argparse.Namespace) -> str:
-    if args.trial == "wheel":
+    if args.trial == "neutral":
+        duration = f" for {args.duration:g} seconds" if args.duration else " until stopped"
+        return f"Keep the wheel and paddle untouched{duration}."
+    if args.trial == "symptom_reproduction":
+        duration = f" for up to {args.duration:g} seconds" if args.duration else " until marked"
+        return f"Use the X-Celerator normally and reproduce the symptom{duration}."
+    if args.trial in ("wheel", "wheel_only"):
         action_seconds = args.duration if args.duration else None
         control = "physical wheel up and down"
     else:
@@ -555,17 +594,48 @@ def preparation_countdown(
     if seconds <= 0:
         return True
     deadline = time.perf_counter() + seconds
+    last_displayed: int | None = None
     while True:
         if stop_event is not None and stop_event.is_set():
             return False
         remaining = max(0.0, deadline - time.perf_counter())
-        if on_progress is not None:
-            _progress(on_progress, "prepare", f"Get ready — starting in {max(1, round(remaining))}s")
-        else:
-            print(f"Prepare for capture: {max(1, round(remaining))}", flush=True)
+        displayed = max(1, int(remaining + 0.999))
+        if displayed != last_displayed:
+            if on_progress is not None:
+                _progress(on_progress, "prepare", f"Get ready — starting in {displayed}s")
+            else:
+                print(f"Prepare for capture: {displayed}", flush=True)
+            last_displayed = displayed
         if remaining <= 0:
             return True
         time.sleep(min(0.05, remaining))
+
+
+def normal_trial_acceptance(
+    trial: TrialLabel,
+    *,
+    input_source: str,
+    event_counts: dict[str, int],
+    wheel_directions: set[str],
+    clean_shutdown: bool,
+    profiles_preserved: bool | None,
+) -> list[str]:
+    """Return concrete reasons a controlled normal-mode trial did not pass."""
+    if trial not in (TrialLabel.PADDLE_ONLY, TrialLabel.WHEEL_ONLY):
+        return []
+    issues: list[str] = []
+    if input_source != "raw_input":
+        issues.append(f"device-attributed Raw Input unavailable ({input_source})")
+    if event_counts.get("wheel", 0) == 0:
+        issues.append("no vertical wheel events recorded")
+    missing = {"up", "down"} - wheel_directions
+    if missing:
+        issues.append("missing wheel direction(s): " + ", ".join(sorted(missing)))
+    if not clean_shutdown:
+        issues.append("capture sources did not shut down cleanly")
+    if profiles_preserved is not True:
+        issues.append("profile preservation was not verified")
+    return issues
 
 
 def write_row(
@@ -604,7 +674,9 @@ def run_monitor(
     on_progress: ProgressCallback | None = None,
     stop_event: threading.Event | None = None,
     summary: dict[str, object] | None = None,
+    marker_queue: queue.SimpleQueue[str] | None = None,
 ) -> int:
+    """Run a guided normal-mode capture without entering calibration mode."""
     if not preparation_countdown(args.start_delay, on_progress, stop_event):
         return 0
     api = WinMMJoystickApi()
@@ -620,144 +692,349 @@ def run_monitor(
         return 0
 
     device = choose_device(devices, args.device)
-    read = lambda: api.read(device.slot)
-    print(f"Monitoring slot {device.slot}: {device.name}")
-    print(
-        f"Keep the paddle untouched for the {args.baseline_seconds:g}s baseline...",
-        flush=True,
+    trial = normalized_trial_label(args.trial)
+    device_control = TyonDeviceControl()
+    fingerprint_before = None
+    try:
+        fingerprint_before = device_control.fingerprint()
+        print("Captured pre-trial fingerprint for all five onboard profiles.")
+    except Exception as exc:
+        print(f"Warning: pre-trial profile fingerprint unavailable ({exc})")
+    session = CaptureSession(
+        str(uuid.uuid4()),
+        trial,
+        CaptureMode.NORMAL,
+        fingerprint=fingerprint_before,
     )
-    _progress(on_progress, "baseline", baseline_progress_message(args.baseline_seconds))
-    baseline, baseline_samples = collect_baseline(
-        read, args.baseline_seconds, args.poll_hz
-    )
-    if stop_event is not None and stop_event.is_set():
-        return 0
-    print(
-        "Baseline: "
-        + " ".join(f"{axis}={baseline[axis]}" for axis in AXES)
-        + f" ({baseline_samples} samples)"
-    )
-
-    capture = ScrollCapture()
+    clock = QpcClock()
+    started_stamp = clock.now()
+    event_queue: queue.SimpleQueue[TelemetryEvent] = queue.SimpleQueue()
+    raw_input: RawInputSource | None = None
+    fallback_capture: ScrollCapture | None = None
     special_capture = SpecialReportCapture()
-    if not args.no_scroll_events:
-        warning = capture.start()
-        if warning:
-            print(f"Warning: {warning}")
-        else:
-            print("Windows scroll-event logging enabled.")
-    special_warning = special_capture.start()
-    if special_warning:
-        print(f"Warning: {special_warning}")
-    else:
-        print("Tyon MI_03 special-report logging enabled.")
-
     default_output = default_log_path()
-    if args.trial == "wheel":
-        default_output = default_output.with_name(
-            default_output.stem.replace("tyon-xcelerator", "tyon-wheel") + ".csv"
-        )
+    filename_label = "wheel" if args.trial == "wheel" else trial.value
+    default_output = default_output.with_name(
+        default_output.stem.replace("tyon-xcelerator", f"tyon-{filename_label}") + ".csv"
+    )
     path = Path(args.output) if args.output else default_output
     path.parent.mkdir(parents=True, exist_ok=True)
-    fields = [
-        "elapsed_ms", "utc", "kind", "trial", *AXES, "buttons", "pov",
-        "scroll_dx", "scroll_dy", "raw_hex",
-    ]
-    stats = {
-        axis: AxisStats(baseline=baseline[axis], away_threshold=args.away_threshold)
-        for axis in AXES
-    }
-    scroll_events = 0
+    baseline_values: dict[str, list[int]] = {axis: [] for axis in AXES}
+    stats: dict[str, AxisStats] = {}
+    event_counts: dict[str, int] = {}
+    wheel_directions: set[str] = set()
     samples = 0
-    started = time.perf_counter()
-    deadline = started + args.duration if args.duration else None
-    next_display = started
+    input_source_name = "disabled" if args.no_scroll_events else "unavailable"
+    next_display = time.perf_counter()
     interval = 1.0 / args.poll_hz
-    last_sample: Sample | None = None
+    clean_shutdown = True
+    profiles_preserved: bool | None = None
+    capture_ended: float | None = None
 
+    def make_event(
+        source: str,
+        kind: str,
+        payload: dict[str, object] | None = None,
+        *,
+        device_id: str | None = None,
+    ) -> TelemetryEvent:
+        return TelemetryEvent(
+            session_id=session.session_id,
+            timestamp=clock.now(),
+            source=source,
+            kind=kind,
+            phase=session.phase,
+            payload=payload or {},
+            device_id=device_id,
+        )
+
+    def write_event(
+        writer: CsvTelemetryWriter,
+        event: TelemetryEvent,
+        *,
+        sample: Sample | None = None,
+        raw_hex: str = "",
+        note: str = "",
+    ) -> None:
+        event_counts[event.kind] = event_counts.get(event.kind, 0) + 1
+        if event.kind == "wheel":
+            direction = event.payload.get("direction")
+            if direction in ("up", "down"):
+                wheel_directions.add(str(direction))
+        writer.write_event(
+            event,
+            axes=sample.axes if sample is not None else None,
+            buttons=sample.buttons if sample is not None else "",
+            pov=sample.pov if sample is not None else "",
+            raw_hex=raw_hex,
+            note=note,
+        )
+
+    def drain_sources(writer: CsvTelemetryWriter) -> None:
+        while True:
+            try:
+                write_event(writer, event_queue.get_nowait())
+            except queue.Empty:
+                break
+        if fallback_capture is not None:
+            for _timestamp, dx, dy in fallback_capture.drain():
+                if dx:
+                    write_event(
+                        writer,
+                        make_event(
+                            "pynput_fallback",
+                            "horizontal_wheel",
+                            {"delta": dx, "direction": "right" if dx > 0 else "left"},
+                        ),
+                    )
+                if dy:
+                    write_event(
+                        writer,
+                        make_event(
+                            "pynput_fallback",
+                            "wheel",
+                            {"delta": dy, "direction": "up" if dy > 0 else "down"},
+                        ),
+                    )
+        for _timestamp, report in special_capture.drain():
+            write_event(
+                writer,
+                make_event("mi03", "special", {"length": len(report)}),
+                raw_hex=report.hex(" "),
+            )
+        if marker_queue is not None:
+            while True:
+                try:
+                    note = marker_queue.get_nowait()
+                except queue.Empty:
+                    break
+                write_event(
+                    writer,
+                    make_event("user", "symptom_marker"),
+                    note=note or "symptom",
+                )
+
+    def write_axis_sample(writer: CsvTelemetryWriter, sample: Sample) -> None:
+        nonlocal samples
+        samples += 1
+        write_event(
+            writer,
+            make_event("winmm", "axis"),
+            sample=sample,
+        )
+
+    print(f"Monitoring slot {device.slot}: {device.name}")
     print(f"Writing {path.resolve()}")
-    if args.trial == "wheel":
-        print("Use ONLY the physical wheel up/down now. Do not touch the paddle.")
-    else:
-        print("Move and release the paddle normally. Press Ctrl+C to stop.")
-    _progress(
-        on_progress,
-        "action",
-        action_progress_message(args),
-    )
+    session.prepare()
+
     try:
         with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fields)
-            writer.writeheader()
-            while (deadline is None or time.perf_counter() < deadline) and not (
+            writer = CsvTelemetryWriter(
+                handle,
+                started_ns=started_stamp.monotonic_ns,
+                trial=trial,
+                ordered_from_sequence=started_stamp.sequence + 1,
+            )
+            write_event(writer, make_event("session", "phase"), note="preparation")
+
+            if not args.no_scroll_events:
+                raw_input = RawInputSource(
+                    session.session_id,
+                    clock,
+                    lambda: session.phase,
+                )
+                try:
+                    raw_input.start(event_queue.put)
+                    input_source_name = "raw_input"
+                    print("Device-attributed Windows Raw Input logging enabled.")
+                except RuntimeError as exc:
+                    print(f"Warning: Raw Input unavailable ({exc}); using pynput scroll fallback.")
+                    raw_input = None
+                    fallback_capture = ScrollCapture()
+                    warning = fallback_capture.start()
+                    if warning:
+                        print(f"Warning: {warning}")
+                    else:
+                        input_source_name = "pynput_fallback"
+
+            special_warning = special_capture.start()
+            if special_warning:
+                print(f"Warning: {special_warning}")
+            else:
+                print("Tyon MI_03 special-report logging enabled.")
+
+            session.begin_baseline()
+            write_event(writer, make_event("session", "phase"), note="baseline")
+            print(
+                f"Keep the paddle and wheel untouched for the {args.baseline_seconds:g}s baseline...",
+                flush=True,
+            )
+            _progress(on_progress, "baseline", baseline_progress_message(args.baseline_seconds))
+            baseline_deadline = time.perf_counter() + args.baseline_seconds
+            while time.perf_counter() < baseline_deadline and not (
                 stop_event is not None and stop_event.is_set()
             ):
                 loop_started = time.perf_counter()
-                sample = read()
-                last_sample = sample
-                samples += 1
-                write_row(writer, started=started, timestamp=sample.timestamp,
-                          kind="sample", sample=sample, trial=args.trial)
+                sample = api.read(device.slot)
+                write_axis_sample(writer, sample)
                 for axis in AXES:
-                    stats[axis].add(sample.timestamp, sample.axes[axis])
-                for timestamp, dx, dy in capture.drain():
-                    scroll_events += 1
-                    write_row(writer, started=started, timestamp=timestamp,
-                              kind="scroll", scroll_dx=dx, scroll_dy=dy,
-                              trial=args.trial)
-                for timestamp, report in special_capture.drain():
-                    write_row(writer, started=started, timestamp=timestamp,
-                              kind="special", raw_hex=report.hex(" "),
-                              trial=args.trial)
-                if sample.timestamp >= next_display:
-                    values = " ".join(
-                        f"{axis}={sample.axes[axis]:5d}({sample.axes[axis] - baseline[axis]:+6d})"
-                        for axis in AXES
-                    )
-                    print(f"\r{values} scroll={scroll_events:4d}", end="", flush=True)
-                    next_display = sample.timestamp + 1.0 / args.display_hz
+                    baseline_values[axis].append(sample.axes[axis])
+                drain_sources(writer)
                 time.sleep(max(0.0, interval - (time.perf_counter() - loop_started)))
-            for timestamp, dx, dy in capture.drain():
-                scroll_events += 1
-                write_row(writer, started=started, timestamp=timestamp,
-                          kind="scroll", scroll_dx=dx, scroll_dy=dy,
-                          trial=args.trial)
-            for timestamp, report in special_capture.drain():
-                write_row(writer, started=started, timestamp=timestamp,
-                          kind="special", raw_hex=report.hex(" "),
-                          trial=args.trial)
+
+            if stop_event is None or not stop_event.is_set():
+                baseline = {
+                    axis: int(statistics.median(baseline_values[axis])) for axis in AXES
+                }
+                stats = {
+                    axis: AxisStats(
+                        baseline=baseline[axis], away_threshold=args.away_threshold
+                    )
+                    for axis in AXES
+                }
+                print(
+                    "Baseline: "
+                    + " ".join(f"{axis}={baseline[axis]}" for axis in AXES)
+                    + f" ({len(baseline_values[AXES[0]])} samples)"
+                )
+                session.begin_action()
+                instruction = action_progress_message(args)
+                print(f"GO: {instruction}")
+                _progress(on_progress, "action", instruction)
+                write_event(writer, make_event("session", "phase"), note="action")
+                action_started = time.perf_counter()
+                deadline = action_started + args.duration if args.duration else None
+                while (deadline is None or time.perf_counter() < deadline) and not (
+                    stop_event is not None and stop_event.is_set()
+                ):
+                    loop_started = time.perf_counter()
+                    sample = api.read(device.slot)
+                    write_axis_sample(writer, sample)
+                    for axis in AXES:
+                        stats[axis].add(sample.timestamp, sample.axes[axis])
+                    drain_sources(writer)
+                    if time.perf_counter() >= next_display:
+                        values = " ".join(
+                            f"{axis}={sample.axes[axis]:5d}({sample.axes[axis] - baseline[axis]:+6d})"
+                            for axis in AXES
+                        )
+                        wheels = event_counts.get("wheel", 0)
+                        print(f"\r{values} wheel={wheels:4d}", end="", flush=True)
+                        next_display = time.perf_counter() + 1.0 / args.display_hz
+                    time.sleep(max(0.0, interval - (time.perf_counter() - loop_started)))
+            drain_sources(writer)
+
+            try:
+                if raw_input is not None:
+                    raw_input.stop()
+                if fallback_capture is not None:
+                    fallback_capture.stop()
+                special_capture.stop()
+                drain_sources(writer)
+                capture_ended = time.perf_counter()
+            except Exception as exc:
+                clean_shutdown = False
+                print(f"Warning: capture source cleanup failed ({exc})", file=sys.stderr)
+
+            if fingerprint_before is not None:
+                try:
+                    fingerprint_after = device_control.fingerprint()
+                    profiles_preserved = fingerprint_after == fingerprint_before
+                    write_event(
+                        writer,
+                        make_event(
+                            "device_control",
+                            "profile_check",
+                            {"preserved": profiles_preserved},
+                        ),
+                        note="all five profile settings/button maps",
+                    )
+                    if profiles_preserved:
+                        print("All five onboard profile fingerprints are unchanged.")
+                    else:
+                        print("CRITICAL: an onboard profile fingerprint changed.", file=sys.stderr)
+                except Exception as exc:
+                    print(f"Warning: post-trial profile fingerprint unavailable ({exc})")
+
+            if stop_event is not None and stop_event.is_set():
+                result = session.cancel(clean_shutdown=clean_shutdown)
+            else:
+                session.stop()
+                write_event(writer, make_event("session", "phase"), note="stopping")
+                result = session.complete(clean_shutdown=clean_shutdown)
+                write_event(writer, make_event("session", "completed"), note=result.state.value)
+            writer.flush_ordered(force=True)
     except KeyboardInterrupt:
-        pass
+        try:
+            session.cancel(clean_shutdown=clean_shutdown)
+        except Exception:
+            pass
+    except BaseException as exc:
+        try:
+            session.fail(str(exc), clean_shutdown=False)
+        except Exception:
+            pass
+        raise
     finally:
-        capture.stop()
+        if raw_input is not None:
+            try:
+                raw_input.stop()
+            except Exception:
+                pass
+        if fallback_capture is not None:
+            fallback_capture.stop()
         special_capture.stop()
-        ended = time.perf_counter()
+        ended = capture_ended or time.perf_counter()
         for item in stats.values():
             item.finish(ended)
         print()
 
-    duration = max(0.001, (last_sample.timestamp if last_sample else ended) - started)
-    print(f"Captured {samples} samples and {scroll_events} scroll events over {duration:.2f}s.")
-    print("Axis summary (baseline, min..max, span, time away, longest away, returns):")
-    for axis in AXES:
-        item = stats[axis]
-        away_seconds = item.away_samples / args.poll_hz
-        print(
-            f"  {axis}: {item.baseline:5d}, {item.minimum:5d}..{item.maximum:5d}, "
-            f"span={item.span:5d}, away={away_seconds:6.2f}s, "
-            f"longest={item.longest_away_seconds:6.2f}s, returns={item.return_count}"
-        )
-    primary = max(AXES, key=lambda axis: stats[axis].span)
-    print(f"Largest-changing axis: {primary} (span {stats[primary].span})")
+    duration = max(0.001, ended - started_stamp.monotonic_ns / 1_000_000_000.0)
+    scroll_events = event_counts.get("wheel", 0) + event_counts.get("horizontal_wheel", 0)
+    print(f"Captured {samples} axis samples and {scroll_events} wheel events over {duration:.2f}s.")
+    primary = "?"
+    if stats:
+        print("Axis summary (baseline, min..max, span, time away, longest away, returns):")
+        for axis in AXES:
+            item = stats[axis]
+            away_seconds = item.away_samples / args.poll_hz
+            print(
+                f"  {axis}: {item.baseline:5d}, {item.minimum:5d}..{item.maximum:5d}, "
+                f"span={item.span:5d}, away={away_seconds:6.2f}s, "
+                f"longest={item.longest_away_seconds:6.2f}s, returns={item.return_count}"
+            )
+        primary = max(AXES, key=lambda axis: stats[axis].span)
+        print(f"Largest-changing axis: {primary} (span {stats[primary].span})")
     print(f"Capture saved: {path.resolve()}")
+    acceptance_issues = normal_trial_acceptance(
+        trial,
+        input_source=input_source_name,
+        event_counts=event_counts,
+        wheel_directions=wheel_directions,
+        clean_shutdown=clean_shutdown,
+        profiles_preserved=profiles_preserved,
+    )
+    if acceptance_issues:
+        print("CONTROLLED TRIAL DID NOT PASS:", file=sys.stderr)
+        for issue in acceptance_issues:
+            print(f"  - {issue}", file=sys.stderr)
     if summary is not None:
         summary.update({
             "samples": samples,
             "scroll_events": scroll_events,
             "primary_axis": primary,
-            "primary_span": stats[primary].span,
+            "primary_span": stats[primary].span if primary in stats else 0,
+            "input_source": input_source_name,
+            "event_counts": dict(event_counts),
+            "session_id": session.session_id,
+            "clean_shutdown": clean_shutdown,
+            "profiles_preserved": profiles_preserved,
+            "wheel_directions": sorted(wheel_directions),
+            "acceptance_issues": acceptance_issues,
         })
-    return 0
+    if profiles_preserved is False:
+        return 4
+    return 5 if acceptance_issues else 0
 
 
 def run_raw_monitor(
@@ -949,7 +1226,8 @@ def capture_output_path(request: CaptureRequest) -> Path:
     if request.raw:
         name = output.stem.replace("tyon-xcelerator", "tyon-xcelerator-raw")
     else:
-        name = output.stem.replace("tyon-xcelerator", "tyon-wheel")
+        filename_label = "wheel" if request.trial == "wheel" else request.label.value
+        name = output.stem.replace("tyon-xcelerator", f"tyon-{filename_label}")
     return output.with_name(name + output.suffix)
 
 
@@ -957,6 +1235,7 @@ def run_capture(
     request: CaptureRequest,
     on_progress: ProgressCallback | None = None,
     stop_event: threading.Event | None = None,
+    marker_queue: queue.SimpleQueue[str] | None = None,
 ) -> CaptureResult:
     """Run a compact-window request through the existing monitor implementation."""
     stop_event = stop_event or threading.Event()
@@ -967,7 +1246,10 @@ def run_capture(
     args = monitor_args_for_request(request, str(output))
     summary: dict[str, object] = {}
     runner = run_raw_monitor if request.raw else run_monitor
-    exit_code = runner(args, on_progress, stop_event, summary)
+    if request.raw:
+        exit_code = runner(args, on_progress, stop_event, summary)
+    else:
+        exit_code = runner(args, on_progress, stop_event, summary, marker_queue)
     return CaptureResult(
         request=request,
         output=output,
@@ -984,7 +1266,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list", action="store_true", help="list readable joystick slots")
     parser.add_argument("--raw", action="store_true",
                         help="temporarily stream raw 0..255 paddle reports; never saves calibration")
-    parser.add_argument("--trial", choices=("paddle", "wheel"), default="paddle",
+    parser.add_argument(
+        "--trial",
+        choices=(
+            "paddle",
+            "wheel",
+            "neutral",
+            "paddle_only",
+            "wheel_only",
+            "symptom_reproduction",
+            "general_observation",
+        ),
+        default="paddle",
                         help="labels/instructions for the controlled input trial")
     parser.add_argument("--device", type=int, help="Windows joystick slot (auto if unambiguous)")
     parser.add_argument("--duration", type=float, default=0.0,
@@ -1017,8 +1310,8 @@ def main() -> int:
         raise SystemExit("--duration cannot be negative")
     if args.start_delay < 0:
         raise SystemExit("--start-delay cannot be negative")
-    if args.raw and args.trial != "paddle" and not args.list:
-        parser.error("--raw only supports --trial paddle")
+    if args.raw and args.trial not in ("paddle", "paddle_only", "neutral") and not args.list:
+        parser.error("--raw only supports paddle or neutral trials")
     try:
         if args.list:
             return run_monitor(args)

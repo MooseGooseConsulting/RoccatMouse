@@ -59,6 +59,11 @@ Create `CorrectionProvider` implementations only for the evidence-supported path
 
 Retain the before-state symptom session and profile fingerprint; prepare backup and preview; obtain confirmation; apply and read back; repeat neutral, paddle-only, wheel-only, and symptom trials; verify improvement without profile or cleanup regressions; roll back once and verify the original state; reapply only if the corrected state passed.
 
-## PR stop condition
+## PR workflow and ready condition
 
-Do not open a non-draft PR for a generic or unproven correction. The PR must name the evidence-supported fault, include before/after/rollback results, preserve unrelated profiles, pass all tests, and document limitations. Self-review, address every valid review, and merge only after correction and rollback are hardware-verified.
+Open a draft PR once evidence has selected a specific fault and a coherent
+correction slice exists; do not implement a generic or unproven correction. Mark
+the PR ready only when it names the evidence-supported fault, includes
+before/after/rollback results, preserves unrelated profiles, passes all tests,
+and documents limitations. Self-review, address every valid review, and merge
+only after correction and rollback are hardware-verified.

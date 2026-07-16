@@ -22,7 +22,7 @@ Authority flows from `NORTH_STAR.md` to `architecture.md` to `PROGRESS.md`. This
 
 - Install: `python -m pip install -r requirements.txt`
 - Test: `python -m unittest discover -s tests -p "test_*.py" -v`
-- Compile: `python -m compileall -q tyon_capture_gui.py tyon_gui.py tyon_input.py tyon_monitor.py tyon_rgb.py tyon_store.py tyon_widgets.py tests`
+- Compile: `python -m compileall -q roccatmouse tyon_capture_gui.py tyon_gui.py tyon_input.py tyon_monitor.py tyon_rgb.py tyon_store.py tyon_widgets.py tests`
 - Probe device: `python tyon_rgb.py --probe`
 - Read profiles: `python tyon_rgb.py --read`
 - List diagnostic axes safely: `python tyon_monitor.py --list`

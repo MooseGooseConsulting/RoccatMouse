@@ -27,7 +27,7 @@ Before testing, read the five onboard profiles in the configurator or with
 `tyon_rgb.py --read` and retain the output for the final profile-preservation
 comparison.
 
-## Paddle-only trial
+## Raw paddle-sensor trial
 
 1. Start `capture-paddle.bat`.
 2. Do not touch the paddle or wheel during the two-second baseline.
@@ -38,15 +38,32 @@ comparison.
    both sides of baseline, and zero unmatched packets under normal conditions.
 6. Open the CSV under `captures\` and confirm every row is labelled `paddle`.
 
+## Normal paddle-scroll trial
+
+1. Run `tyon_monitor.py --trial paddle_only --start-delay 10 --baseline-seconds 2 --duration 15`.
+2. Leave both controls untouched through the countdown and baseline.
+3. At `GO`, move only the X-Celerator up and down and release it repeatedly.
+4. Confirm `input_source` is `raw_input`, both wheel directions appear when the
+   active profile maps the paddle to scrolling, and `profiles_preserved` is true.
+5. Confirm all CSV trial labels are `paddle_only`, phase order is monotonic,
+   sequence numbers are strictly increasing without gaps, and the schema has no
+   cursor-coordinate columns.
+6. Treat exit code 5 as a failed trial and follow the printed reasons; an empty
+   paddle or wheel signal is never an acceptance pass.
+
 ## Wheel-only trial
 
-1. Start `capture-wheel.bat`.
+1. Run `tyon_monitor.py --trial wheel_only --start-delay 10 --baseline-seconds 2 --duration 15`.
 2. Do not touch the paddle or wheel during the two-second baseline.
 3. During the action phase, scroll only the physical wheel in both directions.
    Do not touch the X-Celerator paddle.
 4. Let the capture finish normally.
 5. Confirm the summary reports scroll events in both directions.
-6. Open the CSV under `captures\` and confirm every row is labelled `wheel`.
+6. Confirm all CSV trial labels are `wheel_only`, `input_source` is `raw_input`,
+   sequence numbers are strictly increasing without gaps, and
+   `profiles_preserved` is true.
+7. Treat exit code 5 as a failed trial and repeat only after confirming the
+   intended physical wheel was actuated during the action phase.
 
 Windows does not identify whether a wheel event came from the physical wheel
 or a scroll-mapped paddle. The controlled trial label is therefore evidence

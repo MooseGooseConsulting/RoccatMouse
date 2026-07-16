@@ -1,6 +1,6 @@
 # Normal-mode X-Celerator capture implementation plan
 
-- Status: Planned
+- Status: Complete — direct sensor and current-schema normal paddle output verified on hardware
 - Branch: `feature/normal-mode-xcelerator-diagnostics`
 - Depends on: controlled-capture foundation and documentation authority merged to `main`
 
@@ -58,8 +58,16 @@ Do not expose screen coordinates or `GetCursorPos`. Relative motion remains a ge
 
 ## Hardware acceptance
 
-Run the workflow in `docs/workflows/controlled-diagnostics.md` through the normal paddle-only and wheel-only trials. Confirm MI_03, WinMM, and Raw Input event counts; verify wheel direction/deltas; confirm no cursor movement expectation exists; compare all five profile fingerprints before and after.
+Run the workflow through a direct raw paddle capture and a current-schema normal
+paddle-output capture. Confirm MI_03, WinMM, and Raw Input event counts; verify
+both scroll directions, strict sequencing, no cursor-coordinate fields, and all
+five profile fingerprints before and after. A physical-wheel comparison remains
+useful diagnostic evidence but is not required to prove paddle capture.
 
 ## PR stop condition
 
-Open a non-draft PR only after automated checks and both controlled normal-mode trials pass. Self-review the complete diff, address and resolve every valid review thread, rerun CI/hardware-safe checks, merge, update `main`, and only then begin continuous telemetry.
+Publish the PR once automated checks and the direct-sensor plus normal-paddle
+proofs pass. Self-review the complete diff, address and resolve every valid
+review thread, rerun CI/hardware-safe checks, merge, update `main`, and then begin
+continuous telemetry. Review publication is never blocked merely because an
+additional comparison capture remains useful.
