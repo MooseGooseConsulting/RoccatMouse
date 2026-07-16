@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import threading
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
+from functools import wraps
 from typing import Callable, Protocol
 
 from .arbiter import DeviceSessionArbiter
@@ -67,6 +69,28 @@ SnapshotListener = Callable[[DiagnosticSnapshot], None]
 EventListener = Callable[[TelemetryEvent], None]
 
 
+def _serialized_operation(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._operation_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
+def _defer_notifications(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            self._listener_deferral += 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            with self._lock:
+                self._listener_deferral -= 1
+            self._dispatch_events([])
+    return wrapped
+
+
 class DiagnosticRuntime:
     """Thread-safe owner of normal and bounded raw diagnostic lifecycles.
 
@@ -96,6 +120,7 @@ class DiagnosticRuntime:
         self._monitor_interval = monitor_interval_seconds
         self._new_session_id = session_id_factory or (lambda: str(uuid.uuid4()))
         self._lock = threading.RLock()
+        self._operation_lock = threading.RLock()
         self._normal_id: str | None = None
         self._normal: NormalObservation | None = None
         self._raw_id: str | None = None
@@ -118,9 +143,11 @@ class DiagnosticRuntime:
         self._snapshot_listeners: list[SnapshotListener] = []
         self._event_listeners: list[EventListener] = []
         self._listener_deferral = 0
-        self._deferred_events: list[TelemetryEvent] = []
+        self._notification_queue: deque[TelemetryEvent] = deque()
+        self._notification_dispatching = False
         self._monitor_stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
+        self._recovery_monitor: threading.Thread | None = None
         self._closed = False
 
     def _record_error(self, message: str) -> None:
@@ -208,6 +235,7 @@ class DiagnosticRuntime:
                 "not_configured", self._stream_health,
             )
 
+    @_serialized_operation
     def start_normal(self) -> str:
         with self._lock:
             if self._closed:
@@ -244,6 +272,7 @@ class DiagnosticRuntime:
         self._notify_status()
         return session_id
 
+    @_serialized_operation
     def stop_normal(self) -> None:
         with self._lock:
             if self._arbiter.mode is not RuntimeMode.NORMAL or self._normal_id is None:
@@ -331,6 +360,8 @@ class DiagnosticRuntime:
                     self._normal = None
                     self._normal_id = None
 
+    @_serialized_operation
+    @_defer_notifications
     def start_raw(
         self, mode: RuntimeMode = RuntimeMode.LIVE_RAW, *, arithmetic_baseline: int | None = None
     ) -> str:
@@ -338,7 +369,6 @@ class DiagnosticRuntime:
             raise ValueError("raw mode must be qualifying or live_raw")
         if arithmetic_baseline is not None and not 0 <= arithmetic_baseline <= 255:
             raise ValueError("arithmetic_baseline must be in 0..255")
-        pending_notifications = []
         with self._lock:
             if self._closed:
                 raise RuntimeError("diagnostic runtime is closed")
@@ -357,7 +387,6 @@ class DiagnosticRuntime:
             self._latest_raw_event = self._previous_raw_event = None
             self._latest_windows_output = None
             self._event_buffer.clear(); self._ignored_sequences.clear()
-            self._listener_deferral += 1
             start_stamp = self._clock.now()
             self._expected_sequence = start_stamp.sequence + 1
             bundle = None
@@ -407,13 +436,8 @@ class DiagnosticRuntime:
                 else:
                     detail = f": {'; '.join(cleanup_errors)}" if cleanup_errors else ""
                     self._record_error(f"raw start rollback cleanup unverified: {start_error}{detail}")
-                self._listener_deferral -= 1
-                self._deferred_events.clear()
                 raise
             self._start_monitor()
-            self._listener_deferral -= 1
-            pending_notifications, self._deferred_events = self._deferred_events, []
-        self._dispatch_events(pending_notifications)
         self._notify_status(); self._notify_snapshot()
         return raw_id
 
@@ -469,13 +493,13 @@ class DiagnosticRuntime:
         thread, self._monitor_thread = self._monitor_thread, None
         return thread
 
-    def _join_monitor(self, thread: threading.Thread | None) -> None:
+    def _join_monitor(self, thread: threading.Thread | None) -> bool:
         if thread is None or thread is threading.current_thread():
-            return
+            return True
         thread.join(timeout=max(1.0, self._monitor_interval * 4))
-        if thread.is_alive():
-            raise RuntimeError("diagnostic health monitor did not stop")
+        return not thread.is_alive()
 
+    @_serialized_operation
     def stop_raw(self) -> bool:
         with self._lock:
             if self._arbiter.mode not in self._RAW_MODES or self._raw is None or self._raw_id is None:
@@ -485,13 +509,14 @@ class DiagnosticRuntime:
             self._phase = Phase.STOPPING
             monitor = self._detach_monitor_locked()
             stopping_id = self._raw_id
-        self._join_monitor(monitor)
+        monitor_stopped = self._join_monitor(monitor)
         with self._lock:
             if self._raw_id != stopping_id or self._raw is None:
                 raise RuntimeError("raw diagnostics changed while stopping")
             bundle, raw_id = self._raw, self._raw_id
-            cleanup_verified = True
-            failures = []
+            cleanup_verified = monitor_stopped
+            failures = [] if monitor_stopped else ["health monitor did not stop"]
+            self._recovery_monitor = None if monitor_stopped else monitor
             for label, stop in (("raw source", bundle.accelerator_source.stop),
                                 ("input source", bundle.input_source.stop)):
                 try: stop()
@@ -535,12 +560,22 @@ class DiagnosticRuntime:
         except BaseException as exc:
             self._record_error(f"post-raw fingerprint failed: {exc}")
 
+    @_serialized_operation
     def recover(self) -> bool:
         result = False
         with self._lock:
             if self._arbiter.mode is not RuntimeMode.RECOVERING or self._raw is None or self._raw_id is None:
                 raise RuntimeError("raw recovery is not pending")
-            verified = True
+            recovery_monitor = self._recovery_monitor
+        monitor_stopped = self._join_monitor(recovery_monitor)
+        with self._lock:
+            if self._arbiter.mode is not RuntimeMode.RECOVERING or self._raw is None:
+                return False
+            verified = monitor_stopped
+            if monitor_stopped:
+                self._recovery_monitor = None
+            else:
+                self._record_error("raw recovery health monitor still running")
             for label, stop in (("raw source", self._raw.accelerator_source.stop),
                                 ("input source", self._raw.input_source.stop)):
                 try:
@@ -623,17 +658,31 @@ class DiagnosticRuntime:
 
     def _dispatch_events(self, delivered: list[TelemetryEvent]) -> None:
         with self._lock:
-            if self._listener_deferral:
-                self._deferred_events.extend(delivered)
+            self._notification_queue.extend(delivered)
+            if (self._listener_deferral or not self._notification_queue
+                    or self._notification_dispatching):
                 return
-        for event in delivered:
+            self._notification_dispatching = True
+        try:
+            while True:
+                with self._lock:
+                    if self._listener_deferral:
+                        return
+                    if not self._notification_queue:
+                        return
+                    event = self._notification_queue.popleft()
+                    listeners = tuple(self._event_listeners)
+                    snapshot_listeners = tuple(self._snapshot_listeners)
+                self._call_listeners(listeners, event)
+                if snapshot_listeners:
+                    value = self.snapshot()
+                    self._call_listeners(snapshot_listeners, value)
+        finally:
             with self._lock:
-                listeners = tuple(self._event_listeners)
-                snapshot_listeners = tuple(self._snapshot_listeners)
-            self._call_listeners(listeners, event)
-            if snapshot_listeners:
-                value = self.snapshot()
-                self._call_listeners(snapshot_listeners, value)
+                self._notification_dispatching = False
+                restart = bool(self._notification_queue) and not self._listener_deferral
+            if restart:
+                self._dispatch_events([])
 
     def _apply_measured_event(self, event: TelemetryEvent) -> None:
         if event.kind == "raw_accelerator" and isinstance(event.payload.get("value"), int):
@@ -664,10 +713,10 @@ class DiagnosticRuntime:
         with self._lock:
             if listener in self._event_listeners: self._event_listeners.remove(listener)
 
+    @_serialized_operation
     def close(self) -> None:
         with self._lock:
             if self._closed: return
-            self._closed = True
             mode = self._arbiter.mode
         if mode in self._RAW_MODES:
             self.stop_raw()
@@ -679,6 +728,9 @@ class DiagnosticRuntime:
             mode = self._arbiter.mode
         if mode is RuntimeMode.NORMAL:
             self.stop_normal()
+        with self._lock:
+            if self._arbiter.mode is RuntimeMode.STOPPED:
+                self._closed = True
 
 
 __all__ = [

@@ -104,6 +104,88 @@ class Harness:
 
 
 class DiagnosticRuntimeTests(unittest.TestCase):
+    def test_nonterminating_monitor_does_not_skip_raw_end_and_retains_recovery(self):
+        h = Harness(); runtime = h.runtime(); runtime.start_raw()
+        class StuckMonitor:
+            def join(self, timeout=None): pass
+            def is_alive(self): return True
+        old = runtime._monitor_thread; runtime._monitor_stop.set()
+        if old is not None: old.join(timeout=.5)
+        runtime._monitor_thread = StuckMonitor()
+        self.assertFalse(runtime.stop_raw())
+        self.assertIn("lifecycle.stop", h.calls)
+        self.assertEqual(runtime.status().mode, RuntimeMode.RECOVERING)
+        runtime.close()
+        self.assertFalse(runtime._closed)
+        self.assertEqual(runtime.status().mode, RuntimeMode.RECOVERING)
+
+    def test_concurrent_callbacks_preserve_listener_sequence_order(self):
+        h = Harness(); runtime = h.runtime(); sid = runtime.start_raw(); seen = []
+        first_entered = threading.Event(); release_first = threading.Event()
+        def listener(event):
+            if event.timestamp.sequence == 1:
+                first_entered.set(); release_first.wait(.5)
+            seen.append(event.timestamp.sequence)
+        runtime.add_event_listener(listener)
+        def event(seq):
+            return TelemetryEvent(sid, Timestamp(seq, datetime.now(timezone.utc), seq),
+                                  "raw_accelerator", "raw_accelerator", Phase.ACTION, {"value": seq})
+        first = threading.Thread(target=lambda: runtime._receive_event(event(1)))
+        second = threading.Thread(target=lambda: runtime._receive_event(event(2)))
+        first.start(); self.assertTrue(first_entered.wait(.5)); second.start()
+        time.sleep(.02); release_first.set(); first.join(); second.join()
+        self.assertEqual(seen, [1, 2])
+
+    def test_concurrent_stop_waits_for_normal_start_transition(self):
+        h = Harness(); entered = threading.Event(); release = threading.Event()
+        class BlockingNormal(Normal):
+            def start(self, emit):
+                self.calls.append("normal.start.begin"); entered.set(); release.wait(.5)
+                self.calls.append("normal.start.end")
+        runtime = DiagnosticRuntime(clock=h.clock, normal_factory=lambda *_: BlockingNormal(h.calls),
+                                    raw_factory=h.raw_factory)
+        starter = threading.Thread(target=runtime.start_normal); starter.start()
+        self.assertTrue(entered.wait(.5))
+        stopper = threading.Thread(target=runtime.stop_normal); stopper.start()
+        time.sleep(.02)
+        self.assertNotIn("normal.stop", h.calls)
+        release.set(); starter.join(); stopper.join()
+        self.assertLess(h.calls.index("normal.start.end"), h.calls.index("normal.stop"))
+
+    def test_failed_pause_rollback_sync_event_is_flushed_after_lock_release(self):
+        h = Harness(); seen = []; adapters = []
+        first = Normal(h.calls, fail_stop=True)
+        class EmittingNormal(Normal):
+            def start(self, emit):
+                super().start(emit)
+                emit(TelemetryEvent(normal_id, h.clock.now(), "raw_input", "wheel",
+                                    Phase.ACTION, {"delta": 120}))
+        adapters.extend((first, EmittingNormal(h.calls)))
+        runtime = DiagnosticRuntime(clock=h.clock, normal_factory=lambda *_: adapters.pop(0),
+                                    raw_factory=h.raw_factory)
+        runtime.add_event_listener(seen.append); normal_id = runtime.start_normal()
+        with self.assertRaisesRegex(RuntimeError, "normal stop failed"): runtime.start_raw()
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(runtime.status().mode, RuntimeMode.NORMAL)
+
+    def test_clean_startup_rollback_resume_sync_event_is_flushed(self):
+        h = Harness(); seen = []; adapters = [Normal(h.calls)]
+        class EmittingNormal(Normal):
+            def start(self, emit):
+                super().start(emit)
+                emit(TelemetryEvent(normal_id, h.clock.now(), "raw_input", "wheel",
+                                    Phase.ACTION, {"delta": -120}))
+        adapters.append(EmittingNormal(h.calls))
+        runtime = DiagnosticRuntime(clock=h.clock, normal_factory=lambda *_: adapters.pop(0),
+                                    raw_factory=lambda sid, clock, phase: RawAdapterBundle(
+                                        h.identity, Control(h.fingerprints), Lifecycle(h.calls),
+                                        Source(h.calls, "raw"), Source(h.calls, "input", fail_start=True),
+                                        lambda: h.calls.append("bundle.close")))
+        runtime.add_event_listener(seen.append); normal_id = runtime.start_normal()
+        with self.assertRaisesRegex(RuntimeError, "input start failed"): runtime.start_raw()
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(runtime.status().mode, RuntimeMode.NORMAL)
+
     def test_normal_start_accepts_synchronous_event_for_pending_session(self):
         h = Harness(); seen = []; reentered = threading.Event()
         class EmittingNormal(Normal):
