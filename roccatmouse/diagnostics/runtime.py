@@ -104,6 +104,7 @@ class DiagnosticRuntime:
         self._phase = Phase.NONE
         self._baseline: int | None = None
         self._before_fingerprint = None
+        self._raw_lifecycle_clean = False
         self._errors: list[str] = []
         self._event_buffer: dict[int, TelemetryEvent] = {}
         self._expected_sequence: int | None = None
@@ -331,6 +332,7 @@ class DiagnosticRuntime:
             self._raw_id = raw_id
             self._phase = Phase.PREPARATION
             self._baseline = arithmetic_baseline
+            self._raw_lifecycle_clean = False
             self._latest_raw_event = self._previous_raw_event = None
             self._latest_windows_output = None
             self._event_buffer.clear(); self._ignored_sequences.clear()
@@ -359,7 +361,10 @@ class DiagnosticRuntime:
                     except BaseException as exc:
                         cleanup_verified = False; cleanup_errors.append(f"raw source stop failed: {exc}")
                 if lifecycle_owned:
-                    try: cleanup_verified = bool(bundle.lifecycle.stop()) and cleanup_verified
+                    try:
+                        lifecycle_clean = bool(bundle.lifecycle.stop())
+                        self._raw_lifecycle_clean = lifecycle_clean
+                        cleanup_verified = lifecycle_clean and cleanup_verified
                     except BaseException as exc:
                         cleanup_verified = False; cleanup_errors.append(f"raw lifecycle end failed: {exc}")
                 if input_owned:
@@ -373,6 +378,7 @@ class DiagnosticRuntime:
                 self._arbiter.release_raw(raw_id, cleanup_verified=cleanup_verified)
                 if cleanup_verified:
                     self._raw = None; self._raw_id = None
+                    self._raw_lifecycle_clean = False
                     if normal_id is not None: self._resume_normal()
                 else:
                     detail = f": {'; '.join(cleanup_errors)}" if cleanup_errors else ""
@@ -450,18 +456,24 @@ class DiagnosticRuntime:
                 except BaseException as exc:
                     cleanup_verified = False; failures.append(f"{label}: {exc}")
             try:
-                cleanup_verified = bool(bundle.lifecycle.stop()) and cleanup_verified
+                lifecycle_clean = bool(bundle.lifecycle.stop())
+                self._raw_lifecycle_clean = lifecycle_clean
+                cleanup_verified = lifecycle_clean and cleanup_verified
             except BaseException as exc:
                 cleanup_verified = False; failures.append(f"raw lifecycle: {exc}")
             self._drain_ordered(final=True)
             if cleanup_verified:
                 self._check_fingerprint(bundle)
-                try: bundle.close()
+                try:
+                    bundle.close()
                 except BaseException as exc:
+                    cleanup_verified = False
                     self._record_error(f"raw adapter close failed: {exc}")
+            if cleanup_verified:
                 self._raw = None; self._raw_id = None
+                self._raw_lifecycle_clean = False
                 self._stream_health = RawStreamHealth.STOPPED.value
-            else:
+            if not cleanup_verified:
                 self._record_error("raw cleanup unverified" + (": " + ", ".join(failures) if failures else ""))
             self._arbiter.release_raw(raw_id, cleanup_verified=cleanup_verified)
             self._phase = Phase.NONE if cleanup_verified else Phase.STOPPING
@@ -482,18 +494,33 @@ class DiagnosticRuntime:
         with self._lock:
             if self._arbiter.mode is not RuntimeMode.RECOVERING or self._raw is None or self._raw_id is None:
                 raise RuntimeError("raw recovery is not pending")
-            try:
-                verified = bool(self._raw.lifecycle.recover())
-            except BaseException as exc:
-                verified = False; self._record_error(f"raw recovery failed: {exc}")
+            verified = True
+            for label, stop in (("raw source", self._raw.accelerator_source.stop),
+                                ("input source", self._raw.input_source.stop)):
+                try:
+                    stop()
+                except BaseException as exc:
+                    verified = False
+                    self._record_error(f"raw recovery {label} stop failed: {exc}")
+            if verified and not self._raw_lifecycle_clean:
+                try:
+                    self._raw_lifecycle_clean = bool(self._raw.lifecycle.recover())
+                    verified = self._raw_lifecycle_clean
+                except BaseException as exc:
+                    verified = False; self._record_error(f"raw recovery failed: {exc}")
             if not verified:
                 self._notify_status()
                 return False
             self._check_fingerprint(self._raw)
-            try: self._raw.close()
-            except BaseException as exc: self._record_error(f"raw adapter close failed: {exc}")
+            try:
+                self._raw.close()
+            except BaseException as exc:
+                self._record_error(f"raw recovery adapter close failed: {exc}")
+                self._notify_status()
+                return False
             raw_id = self._raw_id
             self._raw = None; self._raw_id = None
+            self._raw_lifecycle_clean = False
             self._stream_health = RawStreamHealth.STOPPED.value
             self._arbiter.recover(raw_id, cleanup_verified=True)
             self._phase = Phase.NONE

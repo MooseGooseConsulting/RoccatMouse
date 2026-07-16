@@ -104,6 +104,52 @@ class Harness:
 
 
 class DiagnosticRuntimeTests(unittest.TestCase):
+    def test_stop_close_failure_stays_recovering_until_close_retry_then_resumes_normal(self):
+        h = Harness(); attempts = []
+        def close():
+            attempts.append("close")
+            if len(attempts) < 2: raise RuntimeError("bundle close failed")
+            h.calls.append("bundle.close")
+        def factory(session_id, clock, phase):
+            return RawAdapterBundle(h.identity, Control(h.fingerprints), Lifecycle(h.calls),
+                                    Source(h.calls, "raw"), Source(h.calls, "input"), close)
+        runtime = DiagnosticRuntime(clock=h.clock, normal_factory=h.normal_factory, raw_factory=factory)
+        normal_id = runtime.start_normal(); runtime.start_raw()
+        self.assertFalse(runtime.stop_raw())
+        self.assertEqual(runtime.status().mode, RuntimeMode.RECOVERING)
+        self.assertEqual(h.calls.count("normal.start"), 1)
+        self.assertTrue(runtime.recover())
+        self.assertEqual(runtime.status().mode, RuntimeMode.NORMAL)
+        self.assertEqual(runtime.status().session_id, normal_id)
+        self.assertEqual(h.calls.count("normal.start"), 2)
+        self.assertEqual(attempts, ["close", "close"])
+
+    def test_recovery_close_failure_retries_close_without_requiring_lifecycle_recovery_again(self):
+        h = Harness(); close_attempts = []; recover_attempts = []
+        lifecycle = Lifecycle(h.calls, stop_result=False)
+        def recover_once():
+            recover_attempts.append("recover")
+            h.calls.append("lifecycle.recover")
+            return len(recover_attempts) == 1
+        lifecycle.recover = recover_once
+        def close():
+            close_attempts.append("close")
+            if len(close_attempts) == 1: raise RuntimeError("bundle close failed")
+            h.calls.append("bundle.close")
+        bundle = RawAdapterBundle(h.identity, Control(h.fingerprints), lifecycle,
+                                  Source(h.calls, "raw"), Source(h.calls, "input"), close)
+        runtime = DiagnosticRuntime(clock=h.clock, normal_factory=h.normal_factory,
+                                    raw_factory=lambda *_: bundle)
+        runtime.start_normal(); runtime.start_raw(); self.assertFalse(runtime.stop_raw())
+        self.assertFalse(runtime.recover())
+        self.assertEqual(runtime.status().mode, RuntimeMode.RECOVERING)
+        self.assertEqual(h.calls.count("normal.start"), 1)
+        self.assertTrue(runtime.recover())
+        self.assertEqual(runtime.status().mode, RuntimeMode.NORMAL)
+        self.assertEqual(h.calls.count("normal.start"), 2)
+        self.assertEqual(recover_attempts, ["recover"])
+        self.assertEqual(close_attempts, ["close", "close"])
+
     def test_normal_partial_start_rolls_back_adapter_and_surfaces_cleanup_failure(self):
         h = Harness()
         adapter = Normal(h.calls, fail_start=True, fail_stop=True, fail_close=True)
