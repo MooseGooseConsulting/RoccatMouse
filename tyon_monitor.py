@@ -1043,6 +1043,9 @@ def run_raw_monitor(
             except queue.Empty:
                 return
             event_counts[event.kind] = event_counts.get(event.kind, 0) + 1
+            if event.kind == "other_report":
+                writer.write_event(event, raw_hex=str(event.payload.get("raw_hex", "")))
+                continue
             if event.kind == "raw_accelerator":
                 value = int(event.payload["value"])
                 values.append(value)

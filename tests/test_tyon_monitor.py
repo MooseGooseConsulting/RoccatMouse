@@ -476,7 +476,16 @@ class RawMonitorIntegrationTests(unittest.TestCase):
 
         class FakeRawDevice:
             def __init__(self):
-                self.values = iter((110, 25, 205, 25, 205))
+                self.reports = iter(
+                    (
+                        [0x03, 0x00, 0xE0, 0x06, 110],
+                        [0x03, 0x00, 0xD1, 0x00, 99],
+                        [0x03, 0x00, 0xE0, 0x06, 25],
+                        [0x03, 0x00, 0xE0, 0x06, 205],
+                        [0x03, 0x00, 0xE0, 0x06, 25],
+                        [0x03, 0x00, 0xE0, 0x06, 205],
+                    )
+                )
                 self.reads = 0
                 self.closed = False
 
@@ -488,8 +497,7 @@ class RawMonitorIntegrationTests(unittest.TestCase):
                 if self.reads == 2:
                     source_holder["source"].emit_wheel(120)
                     source_holder["source"].emit_wheel(-120)
-                value = next(self.values)
-                return [0x03, 0x00, 0xE0, 0x06, value]
+                return next(self.reports)
 
             def close(self):
                 self.closed = True
@@ -531,7 +539,7 @@ class RawMonitorIntegrationTests(unittest.TestCase):
             trial="paddle",
             start_delay=0,
             verbose=False,
-            duration=0.11,
+            duration=0.13,
             baseline_seconds=0.02,
             display_hz=5.0,
         )
@@ -541,7 +549,7 @@ class RawMonitorIntegrationTests(unittest.TestCase):
             output = Path(directory) / "coexistence.csv"
             marker = Path(directory) / "raw-mode-active.json"
             args.output = str(output)
-            perf_values = [step / 100 for step in range(12)]
+            perf_values = [step / 100 for step in range(14)]
             with patch.dict(sys.modules, {"hid": hid_module, "tyon_rgb": tyon_rgb_module}), patch(
                 "tyon_monitor.RawInputSource", FakeRawInput
             ), patch("tyon_monitor.TyonDeviceControl", return_value=device_control), patch(
@@ -565,7 +573,10 @@ class RawMonitorIntegrationTests(unittest.TestCase):
             sorted(int(row["sequence"]) for row in rows),
         )
         wheel_rows = [row for row in rows if row["kind"] == "wheel"]
+        other_rows = [row for row in rows if row["kind"] == "other_report"]
         self.assertEqual({row["phase"] for row in wheel_rows}, {"action"})
+        self.assertEqual(len(other_rows), 1)
+        self.assertEqual(other_rows[0]["raw_hex"], "03 00 d1 00 63")
         self.assertTrue(all(row["capture_mode"] == "raw" for row in rows))
 
 

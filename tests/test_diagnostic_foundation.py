@@ -40,7 +40,6 @@ class DiagnosticFoundationModelTests(unittest.TestCase):
         result = QualificationResult(
             passed=False,
             evidence_session_ids=("session-1", "session-2"),
-            pass_reasons=("raw reports were ordered",),
             failure_reasons=("missing Tyon output direction(s): down",),
         )
 
@@ -49,6 +48,36 @@ class DiagnosticFoundationModelTests(unittest.TestCase):
         self.assertEqual(snapshot.latest_windows_output["direction"], "up")
         self.assertEqual(result.evidence_session_ids, ("session-1", "session-2"))
         self.assertEqual(result.failure_reasons[0], "missing Tyon output direction(s): down")
+
+    def test_qualification_result_rejects_contradictory_or_unsupported_verdicts(self):
+        invalid = (
+            {"passed": True, "evidence_session_ids": (), "pass_reasons": ("passed",)},
+            {"passed": True, "evidence_session_ids": ("session-1",)},
+            {
+                "passed": True,
+                "evidence_session_ids": ("session-1",),
+                "pass_reasons": ("raw reports were ordered",),
+                "failure_reasons": ("cleanup failed",),
+            },
+            {"passed": False, "evidence_session_ids": ("session-1",)},
+            {
+                "passed": False,
+                "evidence_session_ids": ("session-1",),
+                "pass_reasons": ("raw reports were ordered",),
+                "failure_reasons": ("cleanup failed",),
+            },
+        )
+
+        for arguments in invalid:
+            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                QualificationResult(**arguments)
+
+        passed = QualificationResult(
+            passed=True,
+            evidence_session_ids=("session-1",),
+            pass_reasons=("raw and Windows output coexisted",),
+        )
+        self.assertTrue(passed.passed)
 
     def test_public_records_do_not_infer_owner_observations(self):
         forbidden = {"touched", "released", "physically_centered"}

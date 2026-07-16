@@ -144,6 +144,20 @@ class QualificationResult:
     pass_reasons: tuple[str, ...] = ()
     failure_reasons: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if self.passed:
+            if not self.evidence_session_ids:
+                raise ValueError("a passing qualification requires evidence sessions")
+            if not self.pass_reasons:
+                raise ValueError("a passing qualification requires explicit pass reasons")
+            if self.failure_reasons:
+                raise ValueError("a passing qualification cannot contain failure reasons")
+        else:
+            if not self.failure_reasons:
+                raise ValueError("a failed qualification requires explicit failure reasons")
+            if self.pass_reasons:
+                raise ValueError("a failed qualification cannot contain pass reasons")
+
 
 @dataclass(frozen=True, slots=True)
 class SessionResult:

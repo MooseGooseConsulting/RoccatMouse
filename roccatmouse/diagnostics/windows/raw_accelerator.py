@@ -30,6 +30,15 @@ class RawStreamHealth(str, Enum):
     ERROR = "error"
 
 
+class _RawLifecycleState(str, Enum):
+    IDLE = "idle"
+    STARTING = "starting"
+    ACTIVE = "active"
+    STOPPING = "stopping"
+    RECOVERING = "recovering"
+    ERROR = "error"
+
+
 def parse_xcelerator_report(report: bytes | bytearray | list[int]) -> int | None:
     """Return the raw 0..255 paddle value from a calibration report."""
     data = bytes(report)
@@ -102,7 +111,14 @@ class RawModeLifecycle:
         self.check_write = check_write
         self.write_feature = write_feature
         self.verbose = verbose
-        self.active = False
+        self._lock = threading.RLock()
+        self._state = _RawLifecycleState.IDLE
+        self._active = False
+
+    @property
+    def active(self) -> bool:
+        with self._lock:
+            return self._active
 
     def _send(self, function: int, label: str, *, cleanup: bool = False) -> None:
         try:
@@ -126,33 +142,63 @@ class RawModeLifecycle:
         )
 
     def recover(self) -> bool:
+        with self._lock:
+            return self._recover_locked()
+
+    def _recover_locked(self) -> bool:
         if not self.marker_path.exists():
             return False
-        self._send(XCAL_END, "X-Celerator raw stream recovery end", cleanup=True)
+        self._state = _RawLifecycleState.RECOVERING
+        try:
+            self._send(XCAL_END, "X-Celerator raw stream recovery end", cleanup=True)
+        except BaseException:
+            self._state = _RawLifecycleState.ERROR
+            raise
         self.marker_path.unlink(missing_ok=True)
-        self.active = False
+        self._active = False
+        self._state = _RawLifecycleState.IDLE
         return True
 
     def start(self) -> None:
-        if self.marker_path.exists():
-            self.recover()
-        self._write_marker()
-        try:
-            self._send(XCAL_START, "X-Celerator raw stream start")
-        except BaseException:
+        with self._lock:
+            if self._active or self._state in (
+                _RawLifecycleState.STARTING,
+                _RawLifecycleState.STOPPING,
+                _RawLifecycleState.RECOVERING,
+            ):
+                raise RuntimeError(f"raw lifecycle is already {self._state.value}")
+            if self.marker_path.exists():
+                self._recover_locked()
+            self._write_marker()
+            self._state = _RawLifecycleState.STARTING
             try:
-                self.stop()
-            except Exception:
-                pass
-            raise
-        self.active = True
+                self._send(XCAL_START, "X-Celerator raw stream start")
+            except BaseException:
+                try:
+                    self._stop_locked()
+                except Exception:
+                    pass
+                raise
+            self._active = True
+            self._state = _RawLifecycleState.ACTIVE
 
     def stop(self) -> bool:
-        if not self.active and not self.marker_path.exists():
+        with self._lock:
+            return self._stop_locked()
+
+    def _stop_locked(self) -> bool:
+        if not self._active and not self.marker_path.exists():
+            self._state = _RawLifecycleState.IDLE
             return False
-        self._send(XCAL_END, "X-Celerator raw stream end", cleanup=True)
+        self._state = _RawLifecycleState.STOPPING
+        try:
+            self._send(XCAL_END, "X-Celerator raw stream end", cleanup=True)
+        except BaseException:
+            self._state = _RawLifecycleState.ERROR
+            raise
         self.marker_path.unlink(missing_ok=True)
-        self.active = False
+        self._active = False
+        self._state = _RawLifecycleState.IDLE
         return True
 
 
@@ -176,6 +222,7 @@ class RawAcceleratorSource:
         stale_after_ms: float = 100.0,
         monotonic_ns: Callable[[], int] = time.perf_counter_ns,
         close_device_on_stop: bool = True,
+        stop_timeout_seconds: float = 1.0,
     ) -> None:
         self.session_id = session_id
         self.clock = clock
@@ -187,6 +234,7 @@ class RawAcceleratorSource:
         self.stale_after_ns = int(stale_after_ms * 1_000_000)
         self._monotonic_ns = monotonic_ns
         self.close_device_on_stop = close_device_on_stop
+        self.stop_timeout_seconds = stop_timeout_seconds
         self._emit: EventEmitter | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -224,11 +272,11 @@ class RawAcceleratorSource:
             self._started_at_ns = self._monotonic_ns()
             self._last_report_at_ns = None
             self._health = RawStreamHealth.STARTING
-        if threaded:
-            self._thread = threading.Thread(
-                target=self._read_loop, name="tyon-raw-accelerator", daemon=True
-            )
-            self._thread.start()
+            if threaded:
+                self._thread = threading.Thread(
+                    target=self._read_loop, name="tyon-raw-accelerator", daemon=True
+                )
+                self._thread.start()
 
     def poll_once(self) -> TelemetryEvent | None:
         """Read and emit one report for a caller-owned synchronous loop."""
@@ -236,12 +284,24 @@ class RawAcceleratorSource:
             report = self.device.read(self.read_size, self.read_timeout_ms)
             if not report:
                 return None
+            raw_hex = bytes(report).hex(" ")
             value = parse_xcelerator_report(report)
             if value is None:
+                event = TelemetryEvent(
+                    session_id=self.session_id,
+                    timestamp=self.clock.now(),
+                    source="mi03_raw",
+                    kind="other_report",
+                    phase=self.phase(),
+                    payload={"raw_hex": raw_hex},
+                    device_id=self.device_id,
+                )
                 with self._lock:
                     self.other_report_count += 1
-                return None
-            raw_hex = bytes(report).hex(" ")
+                    emit = self._emit
+                if emit is not None:
+                    emit(event)
+                return event
             event = TelemetryEvent(
                 session_id=self.session_id,
                 timestamp=self.clock.now(),
@@ -279,25 +339,40 @@ class RawAcceleratorSource:
             self._stop.set()
             thread = self._thread
         if thread is not None:
-            thread.join(timeout=max(1.0, self.read_timeout_ms / 250.0))
-        cleanup_error: BaseException | None = None
-        try:
-            if self.close_device_on_stop and not self._closed:
+            thread.join(timeout=self.stop_timeout_seconds)
+
+        close_error: BaseException | None = None
+        if self.close_device_on_stop and not self._closed:
+            try:
                 self.device.close()
                 self._closed = True
-            if thread is not None and thread.is_alive():
-                thread.join(timeout=1.0)
-                if thread.is_alive():
-                    cleanup_error = RuntimeError("raw accelerator read thread did not stop")
-        except BaseException as exc:
-            cleanup_error = exc
-        finally:
+            except BaseException as exc:
+                close_error = exc
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=self.stop_timeout_seconds)
+
+        thread_alive = thread is not None and thread.is_alive()
+        if thread_alive or close_error is not None:
+            details: list[str] = []
+            if thread_alive:
+                details.append("raw accelerator read thread did not stop")
+            if close_error is not None:
+                details.append(str(close_error))
+            failure = RuntimeError("raw accelerator cleanup failed: " + "; ".join(details))
             with self._lock:
-                self._thread = None
                 self._emit = None
-                self._health = RawStreamHealth.STOPPED
-        if cleanup_error is not None:
-            raise RuntimeError(f"raw accelerator cleanup failed: {cleanup_error}") from cleanup_error
+                if not thread_alive:
+                    self._thread = None
+                self._error = failure
+                self._health = RawStreamHealth.ERROR
+            if close_error is not None:
+                raise failure from close_error
+            raise failure
+
+        with self._lock:
+            self._thread = None
+            self._emit = None
+            self._health = RawStreamHealth.STOPPED
 
 
 __all__ = [
