@@ -12,7 +12,7 @@ last_confirmed: 2026-07-15
 
 - PR #1 merged to `main` as `a38f1d6` with the controlled-capture foundation.
 - The Windows configurator remains intact.
-- Seventy-eight unit tests and the Windows CI workflow pass.
+- Eighty-four unit tests and the Windows CI workflow pass.
 - Live discovery confirms the Tyon Telephony control collection and MI_03 special-report interface.
 - Raw capture cleanup and all five onboard-profile reads have been verified on the connected Windows 11 system.
 - The normal-mode engine records QPC/UTC ordered WinMM, MI_03, and device-attributed Raw Input events; short live neutral captures preserve all five profile fingerprints.
@@ -27,19 +27,21 @@ last_confirmed: 2026-07-15
 ## Active Work
 
 - Branch: `feature/continuous-windows-telemetry`.
-- PR #5 is open as a draft. Complete reconnect/recovery, inspection/export, richer device sources, tray verification, and soak instrumentation.
+- PR #5 is open as a draft and continuous observation is running on the connected Tyon.
+- Review remediation on the current branch hardens raw-mode acknowledgement and cleanup reporting, rejects ambiguous multi-Tyon raw/control pairing, preserves raw CSV semantics, detects sequence gaps, and limits controlled-trial acceptance to action-phase wheel events.
+- Complete reconnect/recovery, inspection/export, richer device sources, tray verification, and soak instrumentation.
 
 ## Blockers
 
 - No repository or architecture blocker.
-- No capture-proof blocker remains. A full-time logger, durable storage, useful symptom markers, retention, and soak validation are still unimplemented.
+- No capture-proof blocker remains. The full-time logger, durable storage, symptom markers, and retention are implemented; reconnect/recovery, inspection/export, and soak validation remain.
 - Any corrective device write requires the product's explicit preview/confirmation step.
 
 ## Next Session Focus
 
-1. Complete PR #4 self-review, checks, and review-response loop; merge it.
-2. Create the continuous telemetry branch from updated `main`.
-3. Implement on-demand tray observation, SQLite/WAL storage, one-second aggregates, discrete events, durable symptom markers, retention, and reconnect handling.
+1. Push the review-remediation commit and resolve the corresponding historical PR #1, #3, and #4 review threads.
+2. Complete reconnect/recovery, inspection/export, richer device sources, tray verification, and eight-hour soak evidence for PR #5.
+3. Begin the analysis dashboard only after the telemetry data and soak evidence make it useful.
 
 ## Handoff Pointers
 

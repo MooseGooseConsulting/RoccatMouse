@@ -33,7 +33,7 @@ RoccatMouse exists to keep the Tyon fully configurable on modern Windows while t
 ### G4 — Grow from a Windows-first base without closing the Linux path
 
 - **G4-R1:** Telemetry models, session lifecycle, storage, and analysis remain platform-neutral behind adapters.
-- **G4-R2:** Linux work begins only after Windows capture and storage pass the extended soak and a licensing/adapter spike documents the viable approach.
+- **G4-R2:** After Windows capture and storage pass the extended soak, a bounded licensing/adapter spike may begin. Full Linux feature implementation begins only if that spike documents a viable approach.
 
 ## Anti-Goals
 

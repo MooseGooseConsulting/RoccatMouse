@@ -16,7 +16,8 @@ CSV is useful for the current bounded captures but cannot efficiently support co
 ## Retention
 
 Continuous aggregates and their unmarked discrete events expire after 30 days.
-High-fidelity sessions remain until explicit export or deletion. Retention is
+High-fidelity sessions remain until explicit deletion. Export is an auditable,
+non-destructive operation. Retention is
 transactional and tested at migration boundaries. The current store enables WAL,
 foreign keys, a busy timeout, numbered migrations, strict per-session sequence
 uniqueness, and marker-centered context queries. A bounded single-writer queue

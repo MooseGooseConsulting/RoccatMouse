@@ -55,8 +55,8 @@ Raw calibration streaming exposes sensor truth but may suppress the normal scrol
 
 - Every event has a session ID, monotonically increasing sequence, QPC-derived monotonic timestamp, UTC timestamp, source, kind, and trial phase.
 - Continuous observation stores one-second aggregates plus discrete input/anomaly events; explicit high-fidelity sessions store full-rate samples.
-- Continuous data expires after 30 days. Marked high-fidelity sessions remain until export or deletion.
-- Configuration lives at `%APPDATA%\RoccatMouse\config.json`; telemetry lives at `%LOCALAPPDATA%\RoccatMouse\telemetry.sqlite3`.
+- Continuous data expires after 30 days. Marked high-fidelity sessions remain until explicitly deleted; exporting records an export but does not delete data.
+- Diagnostic runtime configuration lives at `%APPDATA%\RoccatMouse\config.json`; the inherited configurator continues to use its existing `RoccatTyon` settings location. Telemetry lives at `%LOCALAPPDATA%\RoccatMouse\telemetry.sqlite3`.
 - Telemetry is local by default and never requires an account.
 
 ## Safety Invariants

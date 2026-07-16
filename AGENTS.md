@@ -15,7 +15,7 @@ Authority flows from `NORTH_STAR.md` to `architecture.md` to `PROGRESS.md`. This
 - Run a hardware or delivery procedure: `docs/workflows/`
 - Review protocol sources or licenses: `docs/source-audit.md`, then `docs/decisions/0005-linux-licensing-gate.md`
 - Look up completed work: `docs/history/`
-- Write or reconcile authority documentation: invoke the `project-docs` skill
+- Write or reconcile authority documentation: invoke the `project-docs` skill when available; otherwise follow the authority chain and update the documents directly rather than blocking the work.
 - Cross a goal, anti-goal, pillar, or safety invariant: stop and surface the conflict
 
 ## Commands
