@@ -12,7 +12,7 @@ last_confirmed: 2026-07-15
 
 - PR #1 merged to `main` as `a38f1d6` with the controlled-capture foundation.
 - The Windows configurator remains intact.
-- Eighty-four unit tests and the Windows CI workflow pass.
+- Eighty-five unit tests and the Windows CI workflow pass.
 - Live discovery confirms the Tyon Telephony control collection and MI_03 special-report interface.
 - Raw capture cleanup and all five onboard-profile reads have been verified on the connected Windows 11 system.
 - The normal-mode engine records QPC/UTC ordered WinMM, MI_03, and device-attributed Raw Input events; short live neutral captures preserve all five profile fingerprints.
@@ -29,6 +29,7 @@ last_confirmed: 2026-07-15
 - Branch: `feature/continuous-windows-telemetry`.
 - PR #5 is open as a draft and continuous observation is running on the connected Tyon.
 - Review remediation on the current branch hardens raw-mode acknowledgement and cleanup reporting, rejects ambiguous multi-Tyon raw/control pairing, preserves raw CSV semantics, detects sequence gaps, and limits controlled-trial acceptance to action-phase wheel events.
+- All historical actionable review threads on merged PRs #1, #3, and #4 have replies, fix references, and resolved GitHub thread state; PR #5 currently has no review threads or comments.
 - Complete reconnect/recovery, inspection/export, richer device sources, tray verification, and soak instrumentation.
 
 ## Blockers
