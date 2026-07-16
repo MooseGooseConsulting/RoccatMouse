@@ -110,18 +110,27 @@ class CaptureWindow(QMainWindow):
         title.setObjectName("h2")
         layout.addWidget(title)
         note = QLabel(
-            "Choose raw sensor evidence or a normal Windows-output trial. After a 1-second "
-            "warning, keep both controls untouched for 2 seconds, then use only the selected "
-            "control for 10 seconds."
+            "This short proof window answers whether RoccatMouse can capture the paddle. "
+            "Direct sensor temporarily reads its analog value; normal output records the "
+            "scroll events Windows receives. It is not the continuous symptom logger."
         )
         note.setObjectName("note")
         note.setWordWrap(True)
         layout.addWidget(note)
 
         buttons = QHBoxLayout()
-        self.paddle_button = QPushButton("Raw paddle sensor")
-        self.normal_paddle_button = QPushButton("Paddle scrolling")
-        self.wheel_button = QPushButton("Physical wheel")
+        self.paddle_button = QPushButton("1. Direct paddle sensor")
+        self.normal_paddle_button = QPushButton("2. Normal paddle output")
+        self.wheel_button = QPushButton("Wheel comparison")
+        self.paddle_button.setToolTip(
+            "Temporary raw mode: records the paddle's direct 0–255 analog sensor value."
+        )
+        self.normal_paddle_button.setToolTip(
+            "Normal mode: records Tyon wheel events after the active profile mapping."
+        )
+        self.wheel_button.setToolTip(
+            "Normal mode: records the physical wheel as a comparison signal."
+        )
         for button in (self.paddle_button, self.normal_paddle_button, self.wheel_button):
             button.setObjectName("primary")
             button.setMinimumHeight(46)
@@ -139,8 +148,8 @@ class CaptureWindow(QMainWindow):
 
         marker_row = QHBoxLayout()
         self.marker_note = QLineEdit()
-        self.marker_note.setPlaceholderText("Optional symptom note")
-        self.marker_button = QPushButton("Mark symptom now")
+        self.marker_note.setPlaceholderText("Optional note for this short run")
+        self.marker_button = QPushButton("Mark moment in this run")
         self.marker_button.setObjectName("ghost")
         self.marker_button.setEnabled(False)
         self.marker_button.clicked.connect(self.mark_symptom)

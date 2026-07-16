@@ -155,9 +155,9 @@ CLI (lighting + diagnostics):
 
 ### X-Celerator diagnostics
 
-The diagnostics page and `monitor.bat` support three complementary controlled
-captures. **Raw paddle sensor** temporarily exposes the 0..255 calibration
-stream. **Paddle scrolling** and **physical wheel** remain in normal device mode
+The diagnostics page and `monitor.bat` support three complementary short proof
+captures. **Direct paddle sensor** temporarily exposes the 0..255 calibration
+stream. **Normal paddle output** and **wheel comparison** remain in normal device mode
 and record full-rate WinMM axes, MI_03 special reports, and device-attributed
 Win32 Raw Input movement, buttons, and wheel deltas. Every event receives a
 session ID, trial/phase label, QPC monotonic timestamp, UTC timestamp, and strict
@@ -180,10 +180,11 @@ because cursor motion is not part of the paddle-to-scroll signal chain.
 .\capture-gui.bat                            # choose raw paddle, paddle scroll, or wheel
 ```
 
-The compact window gives a one-second warning, then records a two-second
+This compact window proves that the relevant signals can be captured; it is not
+the future full-time symptom logger. It gives a one-second warning, then records a two-second
 untouched baseline followed by a ten-second controlled trial. Captures are
-written to timestamped CSV files under `captures\`. During normal trials, add a
-note and press **Mark symptom now** at the moment the unwanted behavior occurs.
+written to timestamped CSV files under `captures\`. During normal trials, an
+optional note can mark a moment within that short run.
 Use only the labelled control: Windows identifies the Tyon that sent an event,
 but not whether its physical wheel or scroll-mapped paddle produced that event.
 Controlled paddle/wheel commands return exit code 5 when the expected Raw Input

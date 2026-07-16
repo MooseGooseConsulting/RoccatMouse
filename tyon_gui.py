@@ -1737,7 +1737,8 @@ class DiagnosticsPage(QWidget):
             "Die Diagnose trennt Sensor-Rohdaten von der normalen Windows-Ausgabe. "
             "So wird sichtbar, ob ein Fehler am Paddle/Sensor, am Mausprofil oder an "
             "den erzeugten Scroll-Ereignissen liegt. Cursorbewegung gehört nicht zu "
-            "dieser Signalkette."
+            "dieser Signalkette. Diese kurzen Tests sind nicht die spätere "
+            "Daueraufzeichnung für Symptome."
         )
         explanation.setObjectName("note")
         explanation.setWordWrap(True)

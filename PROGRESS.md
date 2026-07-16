@@ -19,24 +19,25 @@ last_confirmed: 2026-07-15
 - Existing controlled evidence shows stable one-count raw neutral noise, a raw paddle range of 24–210, asymmetric paddle scroll output (38/12), and balanced physical-wheel output (81/74); see `docs/history/2026-07-15-hardware-capture-evidence.md`.
 - Empty controlled paddle/wheel trials now fail explicitly with exit code 5 and exact causes instead of producing a false pass.
 - The final live read confirms active profile 1 maps both paddle directions to scrolling, all five profiles remain readable, and no raw-mode recovery marker exists.
+- Current hardware proof is complete: direct sensor capture produced 1,092 reports over 26–209; normal paddle output produced 125 Tyon-attributed wheel events in both directions with strict ordering and preserved profiles.
 - Scroll CSVs contain deltas without pointer coordinates; cursor movement is not part of the diagnostic model.
 
 ## Active Work
 
 - Branch: `feature/normal-mode-xcelerator-diagnostics`.
-- Complete controlled normal-mode paddle-only and wheel-only hardware acceptance, then publish the finished milestone.
+- Finish PR #4 review and merge the completed direct-sensor/normal-output capture proof.
 
 ## Blockers
 
 - No repository or architecture blocker.
-- Current-schema hardware acceptance still requires confirmed paddle and wheel actuation during the prompted action windows; the two latest windows received no physical scroll packets and are recorded as negative runs.
+- No capture-proof blocker remains. A full-time logger, durable storage, useful symptom markers, retention, and soak validation are still unimplemented.
 - Any corrective device write requires the product's explicit preview/confirmation step.
 
 ## Next Session Focus
 
-1. Run the prompted normal paddle-only and physical-wheel trials.
-2. Validate source attribution, deltas, ordered timestamps, and profile preservation.
-3. Complete self-review and Windows CI, merge the milestone, and begin continuous telemetry.
+1. Complete PR #4 self-review, checks, and review-response loop; merge it.
+2. Create the continuous telemetry branch from updated `main`.
+3. Implement on-demand tray observation, SQLite/WAL storage, one-second aggregates, discrete events, durable symptom markers, retention, and reconnect handling.
 
 ## Handoff Pointers
 
