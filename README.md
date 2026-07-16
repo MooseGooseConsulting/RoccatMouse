@@ -186,6 +186,9 @@ written to timestamped CSV files under `captures\`. During normal trials, add a
 note and press **Mark symptom now** at the moment the unwanted behavior occurs.
 Use only the labelled control: Windows identifies the Tyon that sent an event,
 but not whether its physical wheel or scroll-mapped paddle produced that event.
+Controlled paddle/wheel commands return exit code 5 when the expected Raw Input
+signal, both directions, clean shutdown, or profile-preservation check is absent.
+The GUI shows the same concrete failure reasons.
 
 The default path is entirely read-only. Because a scroll-mapped paddle is
 converted to wheel events inside the firmware, `--raw` temporarily enters the

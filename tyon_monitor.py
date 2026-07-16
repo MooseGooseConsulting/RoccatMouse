@@ -594,17 +594,48 @@ def preparation_countdown(
     if seconds <= 0:
         return True
     deadline = time.perf_counter() + seconds
+    last_displayed: int | None = None
     while True:
         if stop_event is not None and stop_event.is_set():
             return False
         remaining = max(0.0, deadline - time.perf_counter())
-        if on_progress is not None:
-            _progress(on_progress, "prepare", f"Get ready — starting in {max(1, round(remaining))}s")
-        else:
-            print(f"Prepare for capture: {max(1, round(remaining))}", flush=True)
+        displayed = max(1, int(remaining + 0.999))
+        if displayed != last_displayed:
+            if on_progress is not None:
+                _progress(on_progress, "prepare", f"Get ready — starting in {displayed}s")
+            else:
+                print(f"Prepare for capture: {displayed}", flush=True)
+            last_displayed = displayed
         if remaining <= 0:
             return True
         time.sleep(min(0.05, remaining))
+
+
+def normal_trial_acceptance(
+    trial: TrialLabel,
+    *,
+    input_source: str,
+    event_counts: dict[str, int],
+    wheel_directions: set[str],
+    clean_shutdown: bool,
+    profiles_preserved: bool | None,
+) -> list[str]:
+    """Return concrete reasons a controlled normal-mode trial did not pass."""
+    if trial not in (TrialLabel.PADDLE_ONLY, TrialLabel.WHEEL_ONLY):
+        return []
+    issues: list[str] = []
+    if input_source != "raw_input":
+        issues.append(f"device-attributed Raw Input unavailable ({input_source})")
+    if event_counts.get("wheel", 0) == 0:
+        issues.append("no vertical wheel events recorded")
+    missing = {"up", "down"} - wheel_directions
+    if missing:
+        issues.append("missing wheel direction(s): " + ", ".join(sorted(missing)))
+    if not clean_shutdown:
+        issues.append("capture sources did not shut down cleanly")
+    if profiles_preserved is not True:
+        issues.append("profile preservation was not verified")
+    return issues
 
 
 def write_row(
@@ -691,6 +722,7 @@ def run_monitor(
     baseline_values: dict[str, list[int]] = {axis: [] for axis in AXES}
     stats: dict[str, AxisStats] = {}
     event_counts: dict[str, int] = {}
+    wheel_directions: set[str] = set()
     samples = 0
     input_source_name = "disabled" if args.no_scroll_events else "unavailable"
     next_display = time.perf_counter()
@@ -725,6 +757,10 @@ def run_monitor(
         note: str = "",
     ) -> None:
         event_counts[event.kind] = event_counts.get(event.kind, 0) + 1
+        if event.kind == "wheel":
+            direction = event.payload.get("direction")
+            if direction in ("up", "down"):
+                wheel_directions.add(str(direction))
         writer.write_event(
             event,
             axes=sample.axes if sample is not None else None,
@@ -970,6 +1006,18 @@ def run_monitor(
         primary = max(AXES, key=lambda axis: stats[axis].span)
         print(f"Largest-changing axis: {primary} (span {stats[primary].span})")
     print(f"Capture saved: {path.resolve()}")
+    acceptance_issues = normal_trial_acceptance(
+        trial,
+        input_source=input_source_name,
+        event_counts=event_counts,
+        wheel_directions=wheel_directions,
+        clean_shutdown=clean_shutdown,
+        profiles_preserved=profiles_preserved,
+    )
+    if acceptance_issues:
+        print("CONTROLLED TRIAL DID NOT PASS:", file=sys.stderr)
+        for issue in acceptance_issues:
+            print(f"  - {issue}", file=sys.stderr)
     if summary is not None:
         summary.update({
             "samples": samples,
@@ -981,8 +1029,12 @@ def run_monitor(
             "session_id": session.session_id,
             "clean_shutdown": clean_shutdown,
             "profiles_preserved": profiles_preserved,
+            "wheel_directions": sorted(wheel_directions),
+            "acceptance_issues": acceptance_issues,
         })
-    return 4 if profiles_preserved is False else 0
+    if profiles_preserved is False:
+        return 4
+    return 5 if acceptance_issues else 0
 
 
 def run_raw_monitor(

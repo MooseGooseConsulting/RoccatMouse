@@ -33,6 +33,14 @@ class CaptureGuiSummaryTests(unittest.TestCase):
         self.assertEqual(capture_status(result), "Capture failed (exit code 3).")
         self.assertIn("Capture failed", format_summary(result))
 
+    def test_failed_controlled_trial_shows_acceptance_reasons(self):
+        result = CaptureResult(
+            CaptureRequest("wheel_only"), Path("captures/wheel.csv"), False, 5,
+            {"acceptance_issues": ["no vertical wheel events recorded"]},
+        )
+
+        self.assertIn("no vertical wheel events recorded", format_summary(result))
+
     def test_formats_normal_mode_source_and_cleanup(self):
         result = CaptureResult(
             CaptureRequest("paddle_only"),

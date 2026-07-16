@@ -31,7 +31,11 @@ def format_summary(result: CaptureResult) -> str:
     if result.cancelled:
         return "Capture stopped. No result summary was produced."
     if result.exit_code != 0:
-        return f"{capture_status(result)}\nSaved: {result.output.resolve()}"
+        issues = result.summary.get("acceptance_issues", [])
+        detail = ""
+        if issues:
+            detail = "\n" + "\n".join(f"• {issue}" for issue in issues)
+        return f"{capture_status(result)}{detail}\nSaved: {result.output.resolve()}"
     if result.request.raw:
         data = result.summary
         low, high = data.get("raw_range", ("?", "?"))

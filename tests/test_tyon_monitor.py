@@ -16,6 +16,7 @@ from tyon_monitor import (
     choose_device,
     parse_xcelerator_report,
     monitor_args_for_request,
+    normal_trial_acceptance,
     run_capture,
     main,
     write_row,
@@ -134,6 +135,43 @@ class CaptureRequestTests(unittest.TestCase):
 
         run_monitor.assert_called_once()
         run_raw_monitor.assert_not_called()
+
+    def test_controlled_trial_rejects_missing_wheel_signal(self):
+        issues = normal_trial_acceptance(
+            CaptureRequest("paddle_only").label,
+            input_source="raw_input",
+            event_counts={"axis": 100},
+            wheel_directions=set(),
+            clean_shutdown=True,
+            profiles_preserved=True,
+        )
+
+        self.assertIn("no vertical wheel events recorded", issues)
+        self.assertIn("missing wheel direction(s): down, up", issues)
+
+    def test_controlled_trial_passes_with_both_raw_input_directions(self):
+        issues = normal_trial_acceptance(
+            CaptureRequest("wheel_only").label,
+            input_source="raw_input",
+            event_counts={"wheel": 8},
+            wheel_directions={"up", "down"},
+            clean_shutdown=True,
+            profiles_preserved=True,
+        )
+
+        self.assertEqual(issues, [])
+
+    def test_neutral_observation_has_no_controlled_signal_requirement(self):
+        issues = normal_trial_acceptance(
+            CaptureRequest("neutral").label,
+            input_source="raw_input",
+            event_counts={},
+            wheel_directions=set(),
+            clean_shutdown=True,
+            profiles_preserved=True,
+        )
+
+        self.assertEqual(issues, [])
 
     @patch("tyon_monitor.run_raw_monitor")
     def test_raw_mode_rejects_wheel_trial_label(self, run_raw_monitor):

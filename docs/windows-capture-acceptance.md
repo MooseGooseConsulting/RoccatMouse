@@ -48,6 +48,8 @@ comparison.
 5. Confirm all CSV trial labels are `paddle_only`, phase order is monotonic,
    sequence numbers are strictly increasing without gaps, and the schema has no
    cursor-coordinate columns.
+6. Treat exit code 5 as a failed trial and follow the printed reasons; an empty
+   paddle or wheel signal is never an acceptance pass.
 
 ## Wheel-only trial
 
@@ -60,6 +62,8 @@ comparison.
 6. Confirm all CSV trial labels are `wheel_only`, `input_source` is `raw_input`,
    sequence numbers are strictly increasing without gaps, and
    `profiles_preserved` is true.
+7. Treat exit code 5 as a failed trial and repeat only after confirming the
+   intended physical wheel was actuated during the action phase.
 
 Windows does not identify whether a wheel event came from the physical wheel
 or a scroll-mapped paddle. The controlled trial label is therefore evidence
