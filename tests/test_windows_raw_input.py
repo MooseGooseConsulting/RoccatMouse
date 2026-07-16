@@ -1,5 +1,9 @@
 import unittest
+import sys
 from unittest.mock import Mock, patch
+
+from roccatmouse.diagnostics.models import Phase
+from roccatmouse.diagnostics.windows.clock import QpcClock
 
 from roccatmouse.diagnostics.windows.raw_input import (
     RI_MOUSE_BUTTON_1_DOWN,
@@ -84,6 +88,16 @@ class RawInputParserTests(unittest.TestCase):
         thread.start.assert_called_once()
         thread.join.assert_called_once_with(timeout=5)
         self.assertIsNone(source._thread)
+
+    @unittest.skipUnless(sys.platform == "win32", "requires a Windows message-only window")
+    def test_real_message_window_starts_and_stops_cleanly(self):
+        source = RawInputSource("win32-lifecycle", QpcClock(), lambda: Phase.ACTION)
+
+        source.start(lambda _event: None)
+        source.stop()
+
+        self.assertIsNone(source._thread)
+        self.assertEqual(source.dropped_packets, 0)
 
 
 if __name__ == "__main__":
