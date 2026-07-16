@@ -1,6 +1,6 @@
 # Continuous Windows telemetry implementation plan
 
-- Status: Planned
+- Status: In progress
 - Branch: `feature/continuous-windows-telemetry`
 - Depends on: direct-sensor and normal-output capture proof merged
 

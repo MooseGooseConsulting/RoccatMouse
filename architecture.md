@@ -28,7 +28,7 @@ Keep the proven Python/PySide6 Windows configurator as the product base, isolate
 | Platform contracts | Current | `DeviceControl`, `AcceleratorSource`, `InputEventSource`, `TelemetrySink`, `Clock`, and `CaptureSession` boundaries; persistent store and analysis contracts arrive with their milestones. |
 | Normal-mode trial engine | Current | Guided neutral, paddle-only, wheel-only, symptom-reproduction, and general-observation phases without entering raw calibration mode. |
 | Continuous observation | Planned | On-demand tray runtime, one-second aggregates, discrete events, reconnect handling, and 30-day retention. |
-| Telemetry database | Planned | Local SQLite database in WAL mode with numbered migrations and explicit retention/export/delete behavior. |
+| Telemetry database | Current | Local SQLite database in WAL mode with numbered migrations, sessions/events/aggregates/markers, strict sequence uniqueness, and 30-day continuous-session retention. |
 | Analysis dashboard | Planned | Live and historical accelerator/axis/scroll plots, anomaly markers, comparisons, and diagnosis summaries. |
 | Corrective tooling | Candidate | Evidence-gated calibration, mapping, or host intervention with backup, preview, confirmation, readback, and rollback. |
 | Linux adapter | Deferred | hidraw/HIDAPI, udev, `evdev`, packaging, and licensing spike after the Windows soak. |

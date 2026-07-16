@@ -24,8 +24,8 @@ last_confirmed: 2026-07-15
 
 ## Active Work
 
-- Branch: `feature/normal-mode-xcelerator-diagnostics`.
-- Finish PR #4 review and merge the completed direct-sensor/normal-output capture proof.
+- Branch: `feature/continuous-windows-telemetry`.
+- Implement the persistent, on-demand observation and symptom-marking workflow; publish coherent slices early in a draft PR.
 
 ## Blockers
 
