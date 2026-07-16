@@ -3,7 +3,7 @@ title: RoccatMouse North Star
 date: 2026-07-15
 author: MooseGooseConsulting
 status: living
-last_confirmed: 2026-07-15
+last_confirmed: 2026-07-16
 ---
 
 # RoccatMouse North Star
@@ -21,9 +21,9 @@ RoccatMouse exists to keep the Tyon fully configurable on modern Windows while t
 
 ### G2 — Make the X-Celerator signal chain observable
 
-- **G2-R1:** Controlled trials separately record raw paddle sensor behavior and normal Windows scroll behavior.
+- **G2-R1:** Controlled trials separately record the device-reported raw paddle value and normal Windows scroll behavior; neither is treated as proof of physical touch.
 - **G2-R2:** Every capture records its trial label, phase, monotonic ordering, UTC time, and cleanup outcome.
-- **G2-R3:** The product can distinguish sensor, device-mapping, Windows-event, and application-level fault domains from collected evidence.
+- **G2-R3:** The product narrows sensor, device-mapping, Windows-event, and application-level fault domains only as far as the collected evidence permits, with attribution limits visible.
 
 ### G3 — Enable evidence-backed correction
 
@@ -33,7 +33,7 @@ RoccatMouse exists to keep the Tyon fully configurable on modern Windows while t
 ### G4 — Grow from a Windows-first base without closing the Linux path
 
 - **G4-R1:** Telemetry models, session lifecycle, storage, and analysis remain platform-neutral behind adapters.
-- **G4-R2:** After Windows capture and storage pass the extended soak, a bounded licensing/adapter spike may begin. Full Linux feature implementation begins only if that spike documents a viable approach.
+- **G4-R2:** After Windows capture and storage have measured stability evidence, a bounded licensing/adapter spike may begin. Full Linux feature implementation begins only if that spike documents a viable approach.
 
 ## Anti-Goals
 

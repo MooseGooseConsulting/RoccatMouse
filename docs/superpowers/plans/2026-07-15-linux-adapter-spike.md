@@ -1,6 +1,6 @@
 # Linux adapter and licensing spike plan
 
-- Status: Deferred until the Windows continuous logger passes its eight-hour soak
+- Status: Deferred until the Windows continuous logger has measured stability evidence
 - Branch: `spike/linux-hardware-adapter`
 - Depends on: Windows telemetry, analysis, and packaging evidence
 

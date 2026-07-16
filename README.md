@@ -161,7 +161,9 @@ stream. **Normal paddle output** and **wheel comparison** remain in normal devic
 and record full-rate WinMM axes, MI_03 special reports, and device-attributed
 Win32 Raw Input movement, buttons, and wheel deltas. Every event receives a
 session ID, trial/phase label, QPC monotonic timestamp, UTC timestamp, and strict
-sequence number. A symptom button adds a timestamped operator note.
+sequence number. On this Tyon the WinMM axes remained constant during paddle
+movement, so they are not treated as paddle-position evidence. A symptom button
+adds a timestamped operator note.
 
 The normal capture fingerprints all five profile-settings and button-map
 reports before and after the trial. It does not write device configuration.
