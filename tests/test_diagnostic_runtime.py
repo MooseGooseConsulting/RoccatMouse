@@ -122,19 +122,44 @@ class DiagnosticRuntimeTests(unittest.TestCase):
     def test_concurrent_callbacks_preserve_listener_sequence_order(self):
         h = Harness(); runtime = h.runtime(); sid = runtime.start_raw(); seen = []
         first_entered = threading.Event(); release_first = threading.Event()
-        def listener(event):
-            if event.timestamp.sequence == 1:
+        original_dispatch = runtime._dispatch_events
+        def delayed_dispatch(delivered):
+            if threading.current_thread().name == "first-source" and not first_entered.is_set():
                 first_entered.set(); release_first.wait(.5)
+            original_dispatch(delivered)
+        runtime._dispatch_events = delayed_dispatch
+        def listener(event):
             seen.append(event.timestamp.sequence)
         runtime.add_event_listener(listener)
         def event(seq):
             return TelemetryEvent(sid, Timestamp(seq, datetime.now(timezone.utc), seq),
                                   "raw_accelerator", "raw_accelerator", Phase.ACTION, {"value": seq})
-        first = threading.Thread(target=lambda: runtime._receive_event(event(1)))
-        second = threading.Thread(target=lambda: runtime._receive_event(event(2)))
+        first = threading.Thread(target=lambda: runtime._receive_event(event(1)), name="first-source")
+        second = threading.Thread(target=lambda: runtime._receive_event(event(2)), name="second-source")
         first.start(); self.assertTrue(first_entered.wait(.5)); second.start()
         time.sleep(.02); release_first.set(); first.join(); second.join()
         self.assertEqual(seen, [1, 2])
+
+    def test_start_listener_runs_after_operation_lock_and_can_stop_reentrantly(self):
+        h = Harness(); stopped = threading.Event(); same_thread_safe = []
+        class EmittingNormal(Normal):
+            def start(self, emit):
+                super().start(emit)
+                emit(TelemetryEvent(session_id, h.clock.now(), "raw_input", "wheel",
+                                    Phase.ACTION, {"delta": 120}))
+        runtime = DiagnosticRuntime(clock=h.clock, normal_factory=lambda *_: EmittingNormal(h.calls),
+                                    raw_factory=h.raw_factory,
+                                    session_id_factory=lambda: "operation-listener")
+        session_id = "operation-listener"
+        def listener(event):
+            same_thread_safe.append(runtime.status().session_id)
+            worker = threading.Thread(target=lambda: (runtime.stop_normal(), stopped.set()))
+            worker.start(); worker.join(timeout=.5)
+        runtime.add_event_listener(listener)
+        runtime.start_normal()
+        self.assertTrue(stopped.is_set())
+        self.assertEqual(same_thread_safe, [session_id])
+        self.assertEqual(runtime.status().mode, RuntimeMode.STOPPED)
 
     def test_concurrent_stop_waits_for_normal_start_transition(self):
         h = Harness(); entered = threading.Event(); release = threading.Event()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+import sys
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
@@ -72,22 +73,24 @@ EventListener = Callable[[TelemetryEvent], None]
 def _serialized_operation(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        with self._operation_lock:
-            return method(self, *args, **kwargs)
-    return wrapped
-
-
-def _defer_notifications(method):
-    @wraps(method)
-    def wrapped(self, *args, **kwargs):
         with self._lock:
             self._listener_deferral += 1
+            self._public_callback_deferral += 1
+        error = None
         try:
-            return method(self, *args, **kwargs)
+            with self._operation_lock:
+                result = method(self, *args, **kwargs)
+        except BaseException:
+            error = sys.exc_info()
         finally:
             with self._lock:
                 self._listener_deferral -= 1
+                self._public_callback_deferral -= 1
             self._dispatch_events([])
+            self._flush_public_callbacks()
+        if error is not None:
+            raise error[1].with_traceback(error[2])
+        return result
     return wrapped
 
 
@@ -145,6 +148,9 @@ class DiagnosticRuntime:
         self._listener_deferral = 0
         self._notification_queue: deque[TelemetryEvent] = deque()
         self._notification_dispatching = False
+        self._public_callback_deferral = 0
+        self._public_callback_queue: deque[tuple[tuple[Callable, ...], object]] = deque()
+        self._public_callback_dispatching = False
         self._monitor_stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
         self._recovery_monitor: threading.Thread | None = None
@@ -158,12 +164,36 @@ class DiagnosticRuntime:
         return "; ".join(self._errors) or None
 
     def _call_listeners(self, listeners: tuple[Callable, ...], value: object) -> None:
+        with self._lock:
+            if self._public_callback_deferral:
+                self._public_callback_queue.append((listeners, value))
+                return
         for listener in listeners:
             try:
                 listener(value)
             except Exception:
                 # Observers cannot take device ownership or session safety down.
                 continue
+
+    def _flush_public_callbacks(self) -> None:
+        with self._lock:
+            if (self._public_callback_deferral or not self._public_callback_queue
+                    or self._public_callback_dispatching):
+                return
+            self._public_callback_dispatching = True
+        try:
+            while True:
+                with self._lock:
+                    if self._public_callback_deferral or not self._public_callback_queue:
+                        return
+                    listeners, value = self._public_callback_queue.popleft()
+                self._call_listeners(listeners, value)
+        finally:
+            with self._lock:
+                self._public_callback_dispatching = False
+                restart = bool(self._public_callback_queue) and not self._public_callback_deferral
+            if restart:
+                self._flush_public_callbacks()
 
     def _notify_status(self) -> None:
         value = self.status()
@@ -361,7 +391,6 @@ class DiagnosticRuntime:
                     self._normal_id = None
 
     @_serialized_operation
-    @_defer_notifications
     def start_raw(
         self, mode: RuntimeMode = RuntimeMode.LIVE_RAW, *, arithmetic_baseline: int | None = None
     ) -> str:
@@ -529,6 +558,7 @@ class DiagnosticRuntime:
             except BaseException as exc:
                 cleanup_verified = False; failures.append(f"raw lifecycle: {exc}")
             delivered = self._drain_ordered(final=True)
+            self._notification_queue.extend(delivered)
             if cleanup_verified:
                 self._check_fingerprint(bundle)
                 try:
@@ -546,7 +576,7 @@ class DiagnosticRuntime:
             self._arbiter.release_raw(raw_id, cleanup_verified=cleanup_verified)
             self._phase = Phase.NONE if cleanup_verified else Phase.STOPPING
             resume_normal = cleanup_verified and self._arbiter.mode is RuntimeMode.NORMAL
-        self._dispatch_events(delivered)
+        self._dispatch_events([])
         if resume_normal:
             self._resume_normal()
         self._notify_status(); self._notify_snapshot()
@@ -631,7 +661,8 @@ class DiagnosticRuntime:
                 return
             self._event_buffer[sequence] = event
             delivered = self._drain_ordered(final=False)
-        self._dispatch_events(delivered)
+            self._notification_queue.extend(delivered)
+        self._dispatch_events([])
 
     def _drain_ordered(self, *, final: bool) -> list[TelemetryEvent]:
         if self._expected_sequence is None:
