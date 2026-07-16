@@ -28,6 +28,7 @@ from roccatmouse.diagnostics.csv_sink import CsvTelemetryWriter
 from roccatmouse.diagnostics.models import (
     CaptureMode,
     Phase,
+    SessionState,
     TelemetryEvent,
     TrialLabel,
 )
@@ -358,8 +359,12 @@ class ScrollCapture:
             # X-Celerator diagnostic schema.
             self.events.put((time.perf_counter(), int(dx), int(dy)))
 
-        self._listener = mouse.Listener(on_scroll=on_scroll)
-        self._listener.start()
+        try:
+            self._listener = mouse.Listener(on_scroll=on_scroll)
+            self._listener.start()
+        except Exception as exc:
+            self._listener = None
+            return f"scroll capture could not start ({exc})"
         return None
 
     def stop(self) -> None:
@@ -454,6 +459,34 @@ def find_raw_interface(infos: list[dict]) -> dict | None:
     return None
 
 
+def find_paired_vendor_interface(infos: list[dict], raw_interface: dict) -> dict | None:
+    """Find the Telephony collection belonging to this raw-interface mouse.
+
+    Choosing the first control collection can operate on another physical Tyon
+    when two are attached, so multiple devices require an unambiguous serial
+    number match.
+    """
+    vendors = [info for info in infos if info.get("usage_page") == 0x000B]
+    if len(vendors) == 1:
+        return vendors[0]
+    raw_serial = raw_interface.get("serial_number")
+    if raw_serial:
+        matches = [info for info in vendors if info.get("serial_number") == raw_serial]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def open_hid_interface(hid_module: object, info: dict) -> object:
+    """Open an already-selected HID collection without re-enumerating."""
+    path = info["path"]
+    if isinstance(path, str):
+        path = path.encode()
+    device = hid_module.device()
+    device.open_path(path)
+    return device
+
+
 def xcal_command(function: int) -> bytes:
     """Build a non-persistent calibration-mode control report."""
     return bytes((REPORT_ID_INFO, INFO_SIZE, function, 0, 0, 0, 0, 0))
@@ -497,7 +530,9 @@ class RawModeLifecycle:
             label,
             self.verbose,
         )
-        if cleanup:
+        # A start report is not complete until the device accepts it. Cleanup
+        # likewise verifies the end report before its recovery marker is gone.
+        if cleanup or function == XCAL_START:
             self.check_write(self.device, verbose=self.verbose)
 
     def _write_marker(self) -> None:
@@ -722,7 +757,9 @@ def run_monitor(
     baseline_values: dict[str, list[int]] = {axis: [] for axis in AXES}
     stats: dict[str, AxisStats] = {}
     event_counts: dict[str, int] = {}
+    action_event_counts: dict[str, int] = {}
     wheel_directions: set[str] = set()
+    action_wheel_directions: set[str] = set()
     samples = 0
     input_source_name = "disabled" if args.no_scroll_events else "unavailable"
     next_display = time.perf_counter()
@@ -730,6 +767,7 @@ def run_monitor(
     clean_shutdown = True
     profiles_preserved: bool | None = None
     capture_ended: float | None = None
+    writer: CsvTelemetryWriter | None = None
 
     def make_event(
         source: str,
@@ -757,10 +795,14 @@ def run_monitor(
         note: str = "",
     ) -> None:
         event_counts[event.kind] = event_counts.get(event.kind, 0) + 1
+        if event.phase is Phase.ACTION:
+            action_event_counts[event.kind] = action_event_counts.get(event.kind, 0) + 1
         if event.kind == "wheel":
             direction = event.payload.get("direction")
             if direction in ("up", "down"):
                 wheel_directions.add(str(direction))
+                if event.phase is Phase.ACTION:
+                    action_wheel_directions.add(str(direction))
         writer.write_event(
             event,
             axes=sample.axes if sample is not None else None,
@@ -813,6 +855,18 @@ def run_monitor(
                     make_event("user", "symptom_marker"),
                     note=note or "symptom",
                 )
+
+    def stop_sources() -> None:
+        errors: list[Exception] = []
+        for source in (raw_input, fallback_capture, special_capture):
+            if source is None:
+                continue
+            try:
+                source.stop()
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise RuntimeError("; ".join(str(exc) for exc in errors))
 
     def write_axis_sample(writer: CsvTelemetryWriter, sample: Sample) -> None:
         nonlocal samples
@@ -883,6 +937,8 @@ def run_monitor(
                 time.sleep(max(0.0, interval - (time.perf_counter() - loop_started)))
 
             if stop_event is None or not stop_event.is_set():
+                if not baseline_values[AXES[0]]:
+                    raise RuntimeError("no baseline axis samples were received; capture was not started")
                 baseline = {
                     axis: int(statistics.median(baseline_values[axis])) for axis in AXES
                 }
@@ -925,11 +981,7 @@ def run_monitor(
             drain_sources(writer)
 
             try:
-                if raw_input is not None:
-                    raw_input.stop()
-                if fallback_capture is not None:
-                    fallback_capture.stop()
-                special_capture.stop()
+                stop_sources()
                 drain_sources(writer)
                 capture_ended = time.perf_counter()
             except Exception as exc:
@@ -966,24 +1018,32 @@ def run_monitor(
             writer.flush_ordered(force=True)
     except KeyboardInterrupt:
         try:
-            session.cancel(clean_shutdown=clean_shutdown)
+            stop_sources()
+            result = session.cancel(clean_shutdown=clean_shutdown)
+            if writer is not None:
+                drain_sources(writer)
+                write_event(writer, make_event("session", "cancelled"), note=result.state.value)
+                writer.flush_ordered(force=True)
         except Exception:
             pass
     except BaseException as exc:
         try:
-            session.fail(str(exc), clean_shutdown=False)
+            clean_shutdown = False
+            stop_sources()
+            if session.state not in (SessionState.COMPLETED, SessionState.CANCELLED, SessionState.FAILED):
+                result = session.fail(str(exc), clean_shutdown=False)
+                if writer is not None:
+                    drain_sources(writer)
+                    write_event(writer, make_event("session", "failed"), note=result.error or "failed")
+                    writer.flush_ordered(force=True)
         except Exception:
             pass
         raise
     finally:
-        if raw_input is not None:
-            try:
-                raw_input.stop()
-            except Exception:
-                pass
-        if fallback_capture is not None:
-            fallback_capture.stop()
-        special_capture.stop()
+        try:
+            stop_sources()
+        except Exception:
+            pass
         ended = capture_ended or time.perf_counter()
         for item in stats.values():
             item.finish(ended)
@@ -1009,8 +1069,8 @@ def run_monitor(
     acceptance_issues = normal_trial_acceptance(
         trial,
         input_source=input_source_name,
-        event_counts=event_counts,
-        wheel_directions=wheel_directions,
+        event_counts=action_event_counts,
+        wheel_directions=action_wheel_directions,
         clean_shutdown=clean_shutdown,
         profiles_preserved=profiles_preserved,
     )
@@ -1026,10 +1086,11 @@ def run_monitor(
             "primary_span": stats[primary].span if primary in stats else 0,
             "input_source": input_source_name,
             "event_counts": dict(event_counts),
+            "action_event_counts": dict(action_event_counts),
             "session_id": session.session_id,
             "clean_shutdown": clean_shutdown,
             "profiles_preserved": profiles_preserved,
-            "wheel_directions": sorted(wheel_directions),
+            "wheel_directions": sorted(action_wheel_directions),
             "acceptance_issues": acceptance_issues,
         })
     if profiles_preserved is False:
@@ -1046,19 +1107,22 @@ def run_raw_monitor(
     """Temporarily stream raw paddle reports without saving calibration."""
     try:
         import hid
-        from tyon_rgb import check_write, enumerate_tyon, open_tyon, write_feature
+        from tyon_rgb import check_write, enumerate_tyon, write_feature
     except Exception as exc:
         raise RuntimeError(f"raw mode requires the project's hidapi dependency ({exc})") from exc
 
     infos = enumerate_tyon()
-    chosen = find_raw_interface(infos)
-    if chosen is None:
+    raw_info = find_raw_interface(infos)
+    if raw_info is None:
         raise RuntimeError("Tyon MI_03 raw-report interface was not found")
-    path_value = chosen["path"]
-    if isinstance(path_value, str):
-        path_value = path_value.encode()
+    vendor_info = find_paired_vendor_interface(infos, raw_info)
+    if vendor_info is None:
+        raise RuntimeError(
+            "could not pair the MI_03 raw interface with exactly one Telephony control interface; "
+            "disconnect other Tyons before raw capture"
+        )
 
-    raw_device = hid.device()
+    raw_device = None
     vendor_device = None
     raw_lifecycle: RawModeLifecycle | None = None
     capture = ScrollCapture()
@@ -1078,6 +1142,7 @@ def run_raw_monitor(
     started = 0.0
     deadline = None
     next_display = 0.0
+    clean_shutdown = True
 
     def write_raw_row(
         writer: csv.DictWriter,
@@ -1105,8 +1170,9 @@ def run_raw_monitor(
     if not preparation_countdown(args.start_delay, on_progress, stop_event):
         return 0
     try:
-        raw_device.open_path(path_value)
-        vendor_device, device_name = open_tyon()
+        raw_device = open_hid_interface(hid, raw_info)
+        vendor_device = open_hid_interface(hid, vendor_info)
+        device_name = "Tyon"
         print(f"Opened {device_name} vendor control and MI_03 raw input interfaces.")
         raw_lifecycle = RawModeLifecycle(
             device=vendor_device,
@@ -1177,6 +1243,7 @@ def run_raw_monitor(
                 if raw_lifecycle.stop():
                     print("Raw calibration-report mode ended; no calibration data was saved.")
             except Exception as exc:
+                clean_shutdown = False
                 print(f"CRITICAL: could not end raw mode cleanly: {exc}", file=sys.stderr)
                 print(
                     f"Recovery marker retained at {raw_lifecycle.marker_path}. "
@@ -1184,7 +1251,8 @@ def run_raw_monitor(
                     file=sys.stderr,
                 )
         try:
-            raw_device.close()
+            if raw_device is not None:
+                raw_device.close()
         except Exception:
             pass
         if vendor_device is not None:
@@ -1211,12 +1279,16 @@ def run_raw_monitor(
                 "raw_range": (min(values), max(values)),
                 "scroll_events": scroll_events,
                 "unmatched": unmatched,
+                "clean_shutdown": clean_shutdown,
             })
     else:
         print(f"No X-Celerator raw reports received; unmatched reports={unmatched}.")
         if summary is not None:
-            summary.update({"reports": 0, "scroll_events": scroll_events, "unmatched": unmatched})
+            summary.update({"reports": 0, "scroll_events": scroll_events, "unmatched": unmatched,
+                            "clean_shutdown": clean_shutdown})
     print(f"Capture saved: {output.resolve()}")
+    if not clean_shutdown:
+        return 6
     return 0 if values else 3
 
 
@@ -1281,7 +1353,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="labels/instructions for the controlled input trial")
     parser.add_argument("--device", type=int, help="Windows joystick slot (auto if unambiguous)")
     parser.add_argument("--duration", type=float, default=0.0,
-                        help="capture seconds; 0 means until Ctrl+C")
+                        help="capture seconds; 0 means until Ctrl+C (raw mode includes its baseline window)")
     parser.add_argument("--start-delay", type=int, default=0,
                         help="pre-capture countdown seconds")
     parser.add_argument("--poll-hz", type=float, default=250.0,
@@ -1310,8 +1382,10 @@ def main() -> int:
         raise SystemExit("--duration cannot be negative")
     if args.start_delay < 0:
         raise SystemExit("--start-delay cannot be negative")
-    if args.raw and args.trial not in ("paddle", "paddle_only", "neutral") and not args.list:
+    if args.raw and args.trial not in ("paddle", "neutral") and not args.list:
         parser.error("--raw only supports paddle or neutral trials")
+    if args.raw and args.trial == "paddle" and args.duration and args.duration <= args.baseline_seconds:
+        parser.error("--raw paddle --duration must exceed --baseline-seconds so an action phase remains")
     try:
         if args.list:
             return run_monitor(args)

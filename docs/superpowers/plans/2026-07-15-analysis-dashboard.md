@@ -2,7 +2,7 @@
 
 - Status: Planned
 - Branch: `feature/diagnostics-dashboard`
-- Depends on: continuous storage merged and eight-hour soak passed
+- Depends on: continuous storage merged and measured stability evidence recorded
 
 ## Why
 
@@ -54,7 +54,7 @@ Thresholds are stored with the analysis version and session result. Defaults com
 
 - Synthetic analyzers produce exact expected metrics and marker locations.
 - Timestamp ties, missing sources, empty sessions, cancelled sessions, and corrupted payloads have deterministic outcomes.
-- Live plotting remains bounded during a simulated eight-hour stream.
+- Live plotting remains bounded during an accelerated long-running synthetic stream.
 - Export/import round trips preserve event ordering, labels, notes, and analysis version.
 - Offscreen dashboard smoke tests and the full Windows CI suite pass.
 

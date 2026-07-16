@@ -7,7 +7,7 @@ import heapq
 import json
 from typing import IO, Mapping
 
-from .models import TelemetryEvent, TrialLabel
+from .models import CaptureMode, TelemetryEvent, TrialLabel
 
 AXIS_FIELDS = ("x", "y", "z", "r", "u", "v")
 CSV_FIELDS = (
@@ -21,6 +21,7 @@ CSV_FIELDS = (
     "source",
     "phase",
     "trial",
+    "capture_mode",
     "device_id",
     *AXIS_FIELDS,
     "buttons",
@@ -32,6 +33,7 @@ CSV_FIELDS = (
     "mouse_button",
     "pressed",
     "raw_hex",
+    "raw_value",
     "note",
     "payload_json",
 )
@@ -46,10 +48,12 @@ class CsvTelemetryWriter:
         *,
         started_ns: int,
         trial: TrialLabel,
+        capture_mode: CaptureMode = CaptureMode.NORMAL,
         ordered_from_sequence: int | None = None,
     ) -> None:
         self.started_ns = started_ns
         self.trial = trial
+        self.capture_mode = capture_mode
         self.writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
         self.writer.writeheader()
         self._next_sequence = ordered_from_sequence
@@ -69,7 +73,7 @@ class CsvTelemetryWriter:
         row: dict[str, object] = {field: "" for field in CSV_FIELDS}
         row.update(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "session_id": event.session_id,
                 "elapsed_ms": round(
                     (event.timestamp.monotonic_ns - self.started_ns) / 1_000_000.0, 3
@@ -81,6 +85,7 @@ class CsvTelemetryWriter:
                 "source": event.source,
                 "phase": event.phase.value,
                 "trial": self.trial.value,
+                "capture_mode": self.capture_mode.value,
                 "device_id": event.device_id or "",
                 "buttons": buttons,
                 "pov": pov,
@@ -110,11 +115,13 @@ class CsvTelemetryWriter:
     def flush_ordered(self, *, force: bool = False) -> None:
         if self._next_sequence is None:
             return
-        while self._pending and (force or self._pending[0][0] == self._next_sequence):
+        if force and self._pending and self._pending[0][0] != self._next_sequence:
+            raise ValueError(
+                f"telemetry sequence gap: expected {self._next_sequence}, "
+                f"received {self._pending[0][0]}"
+            )
+        while self._pending and self._pending[0][0] == self._next_sequence:
             sequence, row = heapq.heappop(self._pending)
-            if not force and sequence != self._next_sequence:
-                heapq.heappush(self._pending, (sequence, row))
-                return
             self.writer.writerow(row)
             self._next_sequence = sequence + 1
 
@@ -123,7 +130,9 @@ def normalize_capture_row(row: Mapping[str, str]) -> dict[str, str]:
     """Normalize a foundation or current CSV row for shared readers."""
     normalized = {field: row.get(field, "") for field in CSV_FIELDS}
     normalized["schema_version"] = normalized["schema_version"] or "1"
-    normalized["trial"] = _LEGACY_TRIALS.get(row.get("trial", ""), row.get("trial", ""))
+    is_raw = row.get("kind", "") == "raw" or row.get("capture_mode", "") == "raw"
+    legacy_trial = row.get("trial", "")
+    normalized["trial"] = legacy_trial if is_raw else _LEGACY_TRIALS.get(legacy_trial, legacy_trial)
+    normalized["capture_mode"] = row.get("capture_mode", "") or ("raw" if is_raw else "normal")
     normalized["source"] = normalized["source"] or "legacy"
-    normalized["phase"] = normalized["phase"] or "action"
     return normalized
