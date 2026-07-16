@@ -177,6 +177,8 @@ because cursor motion is not part of the paddle-to-scroll signal chain.
 .\monitor.bat --trial symptom_reproduction       # normal use with symptom markers
 .\monitor.bat --device 0                     # select a slot when several exist
 .\monitor.bat --raw --duration 30            # temporary raw 0..255 sensor stream
+.\monitor.bat --raw --coexistence --trial paddle --start-delay 5 --baseline-seconds 2 --duration 20
+                                                # prove raw values + Tyon output coexist
 .\capture-paddle.bat                         # compact raw-paddle window (legacy shortcut)
 .\capture-wheel.bat                          # compact physical-wheel window
 .\capture-gui.bat                            # choose raw paddle, paddle scroll, or wheel
@@ -202,6 +204,15 @@ unchanged. While raw mode may be active, a recovery marker is stored at
 `%LOCALAPPDATA%\RoccatMouse\raw-mode-active.json`. The marker is removed only
 after the end command succeeds; if a process is interrupted or cleanup fails,
 the next raw capture attempts the end command before starting a new session.
+
+The `--coexistence` command is the hardware gate for the live overlay. Leave
+both controls untouched through the baseline, then move only the paddle well
+into both directions while keeping the physical wheel untouched. It records
+raw values and device-attributed Windows output on one clock. Exit code 7 means
+the gate did not prove coexistence; the printed reasons cover raw excursion,
+report rate/gaps, both output directions, dropped packets, cleanup, and profile
+preservation. The label captures the owner's controlled action—it does not let
+Windows distinguish the paddle from the physical wheel.
 
 The repeatable hardware procedure is in
 [the Windows controlled-capture acceptance checklist](docs/windows-capture-acceptance.md).

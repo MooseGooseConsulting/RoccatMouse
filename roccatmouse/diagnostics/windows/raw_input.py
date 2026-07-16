@@ -76,12 +76,19 @@ def parse_raw_mouse(packet: RawMousePacket) -> list[tuple[str, dict[str, object]
 
     if packet.button_flags & RI_MOUSE_WHEEL:
         delta = _signed_word(packet.button_data)
-        events.append(("wheel", {"delta": delta, "direction": "up" if delta > 0 else "down"}))
+        if delta:
+            events.append(
+                ("wheel", {"delta": delta, "direction": "up" if delta > 0 else "down"})
+            )
     if packet.button_flags & RI_MOUSE_HWHEEL:
         delta = _signed_word(packet.button_data)
-        events.append(
-            ("horizontal_wheel", {"delta": delta, "direction": "right" if delta > 0 else "left"})
-        )
+        if delta:
+            events.append(
+                (
+                    "horizontal_wheel",
+                    {"delta": delta, "direction": "right" if delta > 0 else "left"},
+                )
+            )
     return events
 
 
@@ -124,10 +131,25 @@ class RawInputSource:
         self._thread = threading.Thread(target=self._message_loop, name="tyon-raw-input", daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout=5):
+            try:
+                self.stop()
+            except Exception as cleanup_exc:
+                raise RuntimeError(
+                    f"Raw Input window did not start; cleanup failed: {cleanup_exc}"
+                ) from cleanup_exc
             raise RuntimeError("Raw Input window did not start")
         if self._error is not None:
+            error = self._error
+            thread = self._thread
+            if thread is not None:
+                thread.join(timeout=5)
             self._thread = None
-            raise RuntimeError(f"Raw Input startup failed: {self._error}") from self._error
+            self._thread_id = 0
+            if thread is not None and thread.is_alive():
+                raise RuntimeError(
+                    f"Raw Input startup failed: {error}; thread did not stop"
+                ) from error
+            raise RuntimeError(f"Raw Input startup failed: {error}") from error
 
     def stop(self) -> None:
         thread = self._thread
@@ -138,8 +160,11 @@ class RawInputSource:
         thread.join(timeout=5)
         if thread.is_alive():
             raise RuntimeError("Raw Input thread did not stop")
+        failure = self._error
         self._thread = None
         self._thread_id = 0
+        if failure is not None:
+            raise RuntimeError(f"Raw Input capture failed: {failure}") from failure
 
     def _emit_packet(self, packet: RawMousePacket) -> None:
         if not self.device_matcher(packet.device_id) or self._emit is None:
@@ -189,6 +214,12 @@ class RawInputSource:
             wintypes.LPVOID,
         ]
         user32.CreateWindowExW.restype = wintypes.HWND
+        user32.DestroyWindow.argtypes = [wintypes.HWND]
+        user32.DestroyWindow.restype = wintypes.BOOL
+        user32.IsWindow.argtypes = [wintypes.HWND]
+        user32.IsWindow.restype = wintypes.BOOL
+        user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+        user32.UnregisterClassW.restype = wintypes.BOOL
         user32.GetRawInputData.argtypes = [
             wintypes.HANDLE,
             wintypes.UINT,
