@@ -6,8 +6,8 @@ Configure **RGB lighting, DPI, polling rate, button mappings, onboard macros,
 and per-game profiles** — all written straight to the mouse's onboard flash, so
 your settings survive unplug, reboot, and even moving the mouse to another PC.
 
-No background service, no telemetry, no account. Just HID feature reports going
-straight to the mouse, in readable Python.
+No required background service, no cloud telemetry, no account. Configuration
+and user-started diagnostics stay local, in readable Python.
 
 _By **Randolf Hellmann** ([@RandolfHellmann](https://github.com/RandolfHellmann)) · MIT licensed._
 
@@ -29,9 +29,9 @@ The official Tyon driver:
   longer exists,
 - is increasingly cranky under Windows 11.
 
-This tool replaces it in pure Python — readable, forkable, no background
-service, no telemetry, no account, just HID feature reports going straight to
-the mouse.
+This tool replaces it in pure Python — readable, forkable, no required
+background service, no cloud telemetry, no account, with configuration going
+straight to the mouse and diagnostic captures staying on the local computer.
 
 ## Features
 
@@ -154,6 +154,11 @@ CLI (lighting + diagnostics):
 feature or output reports to the mouse. It also correlates global scroll events
 when `pynput` is available, which helps distinguish sensor/centering drift from
 the profile's scroll action.
+
+Scroll rows contain wheel deltas only. `pynput` also provides the pointer's
+screen coordinates to its callback, but those values are not cursor movement
+and are deliberately excluded: cursor motion is not part of the
+paddle-to-scroll signal chain.
 
 ```pwsh
 .\monitor.bat --list                         # show readable joystick slots

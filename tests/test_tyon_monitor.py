@@ -1,3 +1,5 @@
+import csv
+import io
 import unittest
 import sys
 from pathlib import Path
@@ -16,8 +18,34 @@ from tyon_monitor import (
     monitor_args_for_request,
     run_capture,
     main,
+    write_row,
     xcal_command,
 )
+
+
+class CaptureSchemaTests(unittest.TestCase):
+    def test_scroll_rows_exclude_pointer_coordinates(self):
+        fields = [
+            "elapsed_ms", "utc", "kind", "trial", "x", "y", "z", "r", "u", "v",
+            "buttons", "pov", "scroll_dx", "scroll_dy", "raw_hex",
+        ]
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=fields)
+
+        write_row(
+            writer,
+            started=10.0,
+            timestamp=10.5,
+            kind="scroll",
+            scroll_dx=0,
+            scroll_dy=-1,
+            trial="wheel",
+        )
+
+        row = next(csv.DictReader(io.StringIO(",".join(fields) + "\n" + output.getvalue())))
+        self.assertEqual(row["scroll_dy"], "-1")
+        self.assertNotIn("cursor_x", row)
+        self.assertNotIn("cursor_y", row)
 
 
 class CaptureRequestTests(unittest.TestCase):

@@ -1,5 +1,12 @@
 # Windows controlled-capture acceptance
 
+## Diagnostic boundary
+
+The X-Celerator path under test is the physical paddle, its analog signal,
+device mapping, and the resulting Windows scroll events. Cursor movement is not
+expected during a wheel or paddle-scroll event and is not an acceptance signal.
+The capture CSV therefore records scroll deltas without pointer coordinates.
+
 Run this checklist on Windows 11 with the Tyon connected. Close other tools
 that may hold the mouse's HID interfaces. These checks do not save calibration
 values or rewrite profiles.

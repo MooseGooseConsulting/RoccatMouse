@@ -304,7 +304,7 @@ class ScrollCapture:
     """Optional global scroll-event capture using the existing pynput dependency."""
 
     def __init__(self) -> None:
-        self.events: queue.SimpleQueue[tuple[float, int, int, int, int]] = queue.SimpleQueue()
+        self.events: queue.SimpleQueue[tuple[float, int, int]] = queue.SimpleQueue()
         self._listener = None
 
     def start(self) -> str | None:
@@ -313,8 +313,11 @@ class ScrollCapture:
         except Exception as exc:
             return f"scroll capture unavailable ({exc})"
 
-        def on_scroll(x: int, y: int, dx: int, dy: int) -> None:
-            self.events.put((time.perf_counter(), int(x), int(y), int(dx), int(dy)))
+        def on_scroll(_x: int, _y: int, dx: int, dy: int) -> None:
+            # pynput supplies pointer coordinates as callback context. They are
+            # not cursor movement and are intentionally excluded from the
+            # X-Celerator diagnostic schema.
+            self.events.put((time.perf_counter(), int(dx), int(dy)))
 
         self._listener = mouse.Listener(on_scroll=on_scroll)
         self._listener.start()
@@ -325,7 +328,7 @@ class ScrollCapture:
             self._listener.stop()
             self._listener = None
 
-    def drain(self) -> Iterable[tuple[float, int, int, int, int]]:
+    def drain(self) -> Iterable[tuple[float, int, int]]:
         while True:
             try:
                 yield self.events.get_nowait()
@@ -574,8 +577,6 @@ def write_row(
     sample: Sample | None = None,
     scroll_dx: int | str = "",
     scroll_dy: int | str = "",
-    cursor_x: int | str = "",
-    cursor_y: int | str = "",
     raw_hex: str = "",
     trial: str = "",
 ) -> None:
@@ -588,8 +589,6 @@ def write_row(
         "pov": "",
         "scroll_dx": scroll_dx,
         "scroll_dy": scroll_dy,
-        "cursor_x": cursor_x,
-        "cursor_y": cursor_y,
         "raw_hex": raw_hex,
     }
     row.update({axis: "" for axis in AXES})
@@ -662,7 +661,7 @@ def run_monitor(
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "elapsed_ms", "utc", "kind", "trial", *AXES, "buttons", "pov",
-        "scroll_dx", "scroll_dy", "cursor_x", "cursor_y", "raw_hex",
+        "scroll_dx", "scroll_dy", "raw_hex",
     ]
     stats = {
         axis: AxisStats(baseline=baseline[axis], away_threshold=args.away_threshold)
@@ -701,11 +700,11 @@ def run_monitor(
                           kind="sample", sample=sample, trial=args.trial)
                 for axis in AXES:
                     stats[axis].add(sample.timestamp, sample.axes[axis])
-                for timestamp, x, y, dx, dy in capture.drain():
+                for timestamp, dx, dy in capture.drain():
                     scroll_events += 1
                     write_row(writer, started=started, timestamp=timestamp,
                               kind="scroll", scroll_dx=dx, scroll_dy=dy,
-                              cursor_x=x, cursor_y=y, trial=args.trial)
+                              trial=args.trial)
                 for timestamp, report in special_capture.drain():
                     write_row(writer, started=started, timestamp=timestamp,
                               kind="special", raw_hex=report.hex(" "),
@@ -718,11 +717,11 @@ def run_monitor(
                     print(f"\r{values} scroll={scroll_events:4d}", end="", flush=True)
                     next_display = sample.timestamp + 1.0 / args.display_hz
                 time.sleep(max(0.0, interval - (time.perf_counter() - loop_started)))
-            for timestamp, x, y, dx, dy in capture.drain():
+            for timestamp, dx, dy in capture.drain():
                 scroll_events += 1
                 write_row(writer, started=started, timestamp=timestamp,
                           kind="scroll", scroll_dx=dx, scroll_dy=dy,
-                          cursor_x=x, cursor_y=y, trial=args.trial)
+                          trial=args.trial)
             for timestamp, report in special_capture.drain():
                 write_row(writer, started=started, timestamp=timestamp,
                           kind="special", raw_hex=report.hex(" "),
@@ -793,7 +792,7 @@ def run_raw_monitor(
     output.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "elapsed_ms", "utc", "kind", "trial", "raw_value", "raw_hex",
-        "scroll_dx", "scroll_dy", "cursor_x", "cursor_y",
+        "scroll_dx", "scroll_dy",
     ]
     values: list[int] = []
     baseline_values: list[int] = []
@@ -812,8 +811,6 @@ def run_raw_monitor(
         raw_hex: str = "",
         dx: int | str = "",
         dy: int | str = "",
-        cursor_x: int | str = "",
-        cursor_y: int | str = "",
     ) -> None:
         writer.writerow({
             "elapsed_ms": round((timestamp - started) * 1000.0, 3),
@@ -824,8 +821,6 @@ def run_raw_monitor(
             "raw_hex": raw_hex,
             "scroll_dx": dx,
             "scroll_dy": dy,
-            "cursor_x": cursor_x,
-            "cursor_y": cursor_y,
         })
 
     print("RAW MODE: no calibration values will be saved.")
@@ -889,14 +884,12 @@ def run_raw_monitor(
                     print(f"\nGO: {instruction}")
                     _progress(on_progress, "action", instruction)
                     action_announced = True
-                for timestamp, x, y, dx, dy in capture.drain():
+                for timestamp, dx, dy in capture.drain():
                     scroll_events += 1
-                    write_raw_row(writer, timestamp, "scroll", dx=dx, dy=dy,
-                                  cursor_x=x, cursor_y=y)
-            for timestamp, x, y, dx, dy in capture.drain():
+                    write_raw_row(writer, timestamp, "scroll", dx=dx, dy=dy)
+            for timestamp, dx, dy in capture.drain():
                 scroll_events += 1
-                write_raw_row(writer, timestamp, "scroll", dx=dx, dy=dy,
-                              cursor_x=x, cursor_y=y)
+                write_raw_row(writer, timestamp, "scroll", dx=dx, dy=dy)
     except KeyboardInterrupt:
         pass
     finally:
