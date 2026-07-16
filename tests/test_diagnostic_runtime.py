@@ -180,7 +180,44 @@ class DiagnosticRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "lifecycle start failed"):
             runtime.start_raw()
         self.assertEqual(runtime.status().mode, RuntimeMode.RECOVERING)
+        self.assertNotIn("bundle.close", h.calls)
+
+    def test_partial_raw_start_recovery_keeps_bundle_and_resumes_normal_only_after_recover(self):
+        h = Harness(); lifecycle = Lifecycle(h.calls, stop_result=False, recover_result=True)
+        def fail_start():
+            h.calls.append("lifecycle.start")
+            raise RuntimeError("lifecycle start failed")
+        lifecycle.start = fail_start
+        bundle = RawAdapterBundle(h.identity, Control(h.fingerprints), lifecycle,
+                                  Source(h.calls, "raw"), Source(h.calls, "input"),
+                                  lambda: h.calls.append("bundle.close"))
+        runtime = DiagnosticRuntime(clock=h.clock, normal_factory=h.normal_factory,
+                                    raw_factory=lambda *_: bundle)
+        normal_id = runtime.start_normal()
+        with self.assertRaisesRegex(RuntimeError, "lifecycle start failed"):
+            runtime.start_raw()
+        self.assertEqual(runtime.status().mode, RuntimeMode.RECOVERING)
+        self.assertEqual(h.calls.count("normal.start"), 1)
+        self.assertNotIn("bundle.close", h.calls)
+        self.assertTrue(runtime.recover())
+        self.assertEqual(runtime.status().mode, RuntimeMode.NORMAL)
+        self.assertEqual(runtime.status().session_id, normal_id)
+        self.assertEqual(h.calls.count("normal.start"), 2)
+        self.assertIn("lifecycle.recover", h.calls)
         self.assertIn("bundle.close", h.calls)
+
+    def test_partial_normal_resume_is_stopped_and_closed_before_ownership_release(self):
+        h = Harness()
+        adapters = [Normal(h.calls), Normal(h.calls, fail_start=True,
+                                            fail_stop=True, fail_close=True)]
+        runtime = DiagnosticRuntime(clock=h.clock, normal_factory=lambda *_: adapters.pop(0),
+                                    raw_factory=h.raw_factory)
+        runtime.start_normal(); runtime.start_raw(); runtime.stop_raw()
+        self.assertEqual(runtime.status().mode, RuntimeMode.STOPPED)
+        self.assertEqual(h.calls[-3:], ["normal.start", "normal.stop", "normal.close"])
+        self.assertIn("normal observation resume failed", runtime.status().error)
+        self.assertIn("normal stop failed", runtime.status().error)
+        self.assertIn("normal close failed", runtime.status().error)
 
     def test_failed_normal_pause_reopens_normal_and_never_acquires_raw(self):
         h = Harness(); adapters = [Normal(h.calls, fail_stop=True), Normal(h.calls)]

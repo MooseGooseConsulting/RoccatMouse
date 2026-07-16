@@ -292,15 +292,23 @@ class DiagnosticRuntime:
     def _resume_normal(self) -> None:
         if self._normal_id is None or self._normal_factory is None:
             return
+        normal = None
         try:
             normal = self._normal_factory(self._normal_id, self._clock)
             normal.start(self._receive_event)
             self._normal = normal
         except BaseException as exc:
             self._record_error(f"normal observation resume failed: {exc}")
+            if normal is not None:
+                for label, cleanup in (("normal stop", normal.stop), ("normal close", normal.close)):
+                    try:
+                        cleanup()
+                    except BaseException as cleanup_exc:
+                        self._record_error(f"normal resume {label} failed: {cleanup_exc}")
             try:
                 self._arbiter.release_normal(self._normal_id)
             finally:
+                self._normal = None
                 self._normal_id = None
 
     def start_raw(
@@ -358,7 +366,7 @@ class DiagnosticRuntime:
                     try: bundle.input_source.stop()
                     except BaseException as exc:
                         cleanup_verified = False; cleanup_errors.append(f"input source stop failed: {exc}")
-                if bundle is not None:
+                if bundle is not None and cleanup_verified:
                     try: bundle.close()
                     except BaseException as exc:
                         cleanup_verified = False; cleanup_errors.append(f"raw adapter close failed: {exc}")
