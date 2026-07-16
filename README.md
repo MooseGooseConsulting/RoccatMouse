@@ -1,14 +1,20 @@
-# Roccat Tyon RGB
+# RoccatMouse
 
-A modern Windows replacement for the discontinued Roccat Tyon driver.
+A Windows-first replacement for the discontinued Roccat Tyon driver, combining
+the full Roccat Tyon RGB configurator with controlled hardware diagnostics.
 Configure **RGB lighting, DPI, polling rate, button mappings, onboard macros,
 and per-game profiles** — all written straight to the mouse's onboard flash, so
 your settings survive unplug, reboot, and even moving the mouse to another PC.
 
-No background service, no telemetry, no account. Just HID feature reports going
-straight to the mouse, in readable Python.
+No required background service, no cloud telemetry, no account. Configuration
+and user-started diagnostics stay local, in readable Python.
 
 _By **Randolf Hellmann** ([@RandolfHellmann](https://github.com/RandolfHellmann)) · MIT licensed._
+
+This repository retains the configurator's MIT history as its downstream
+product base. Windows diagnostics are developed here; Linux remains a later
+stretch milestone. The exact upstream commits and the GPL reuse boundary are
+recorded in [the source audit](docs/source-audit.md).
 
 ![Screenshot](docs/screenshot.png)
 
@@ -23,9 +29,9 @@ The official Tyon driver:
   longer exists,
 - is increasingly cranky under Windows 11.
 
-This tool replaces it in pure Python — readable, forkable, no background
-service, no telemetry, no account, just HID feature reports going straight to
-the mouse.
+This tool replaces it in pure Python — readable, forkable, no required
+background service, no cloud telemetry, no account, with configuration going
+straight to the mouse and diagnostic captures staying on the local computer.
 
 ## Features
 
@@ -142,6 +148,47 @@ CLI (lighting + diagnostics):
 
 `rgb.bat --help` lists every flag.
 
+### X-Celerator signal monitor
+
+`monitor.bat` records the paddle's Windows joystick axes without sending any
+feature or output reports to the mouse. It also correlates global scroll events
+when `pynput` is available, which helps distinguish sensor/centering drift from
+the profile's scroll action.
+
+Scroll rows contain wheel deltas only. `pynput` also provides the pointer's
+screen coordinates to its callback, but those values are not cursor movement
+and are deliberately excluded: cursor motion is not part of the
+paddle-to-scroll signal chain.
+
+```pwsh
+.\monitor.bat --list                         # show readable joystick slots
+.\monitor.bat --duration 30                  # 30-second diagnostic capture
+.\monitor.bat --device 0                     # select a slot when several exist
+.\monitor.bat --raw --duration 30            # temporary raw 0..255 sensor stream
+.\capture-paddle.bat                         # opens compact capture window, paddle selected
+.\capture-wheel.bat                          # opens compact capture window, wheel selected
+```
+
+The compact window gives a one-second warning, then records a two-second
+untouched baseline followed by a ten-second controlled trial. Both launchers
+open the same window, so you can switch between paddle and wheel tests before
+starting. Captures are written to timestamped CSV files under `captures\`;
+avoid using the wheel during a correlated paddle test because Windows scroll
+events do not identify which physical control produced them.
+
+The default path is entirely read-only. Because a scroll-mapped paddle is
+converted to wheel events inside the firmware, `--raw` temporarily enters the
+mouse's calibration-report mode to expose the underlying 0..255 sensor value.
+It always sends the matching end command in cleanup and never sends the
+separate command that saves calibration values, so onboard profiles remain
+unchanged. While raw mode may be active, a recovery marker is stored at
+`%LOCALAPPDATA%\RoccatMouse\raw-mode-active.json`. The marker is removed only
+after the end command succeeds; if a process is interrupted or cleanup fails,
+the next raw capture attempts the end command before starting a new session.
+
+The repeatable hardware procedure is in
+[the Windows controlled-capture acceptance checklist](docs/windows-capture-acceptance.md).
+
 ## Where settings live
 
 GUI preferences, game profiles, and recorded build orders are stored under
@@ -157,6 +204,7 @@ in the mouse's own onboard flash, not on disk.
 | `tyon_gui.py` | PySide6 GUI (the app) |
 | `tyon_widgets.py` | Theme, color wheel, and custom widgets |
 | `tyon_input.py` | Host-side recorder/player (pynput) for the SC2 trainer |
+| `tyon_monitor.py` | Read-only X-Celerator axis and scroll-event monitor |
 | `tyon_store.py` | Persistent prefs, game profiles, and build orders |
 | `make_icon.py` | Generates `tyon.ico` for the Desktop shortcut |
 | `rgb.bat` / `gui.bat` | Convenience launchers (use the venv python) |
