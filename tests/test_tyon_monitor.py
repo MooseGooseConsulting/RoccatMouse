@@ -13,7 +13,6 @@ from tyon_monitor import (
     AxisStats,
     CaptureRequest,
     JoystickInfo,
-    RawModeLifecycle,
     action_progress_message,
     baseline_progress_message,
     choose_device,
@@ -568,116 +567,6 @@ class RawMonitorIntegrationTests(unittest.TestCase):
         wheel_rows = [row for row in rows if row["kind"] == "wheel"]
         self.assertEqual({row["phase"] for row in wheel_rows}, {"action"})
         self.assertTrue(all(row["capture_mode"] == "raw" for row in rows))
-
-
-class RawModeLifecycleTests(unittest.TestCase):
-    def make_lifecycle(self, marker, commands, *, fail_on=None):
-        def check_write(device, verbose=False):
-            self.assertIsNotNone(device)
-
-        def write_feature(device, packet, label, verbose=False):
-            function = packet[2]
-            if function == 0x08:
-                self.assertTrue(marker.exists(), "marker must predate raw-mode start")
-            commands.append(function)
-            if function == fail_on:
-                raise OSError(f"simulated function {function:#x} failure")
-
-        return RawModeLifecycle(
-            device=object(),
-            marker_path=marker,
-            check_write=check_write,
-            write_feature=write_feature,
-        )
-
-    def test_start_writes_recovery_marker_before_start_report(self):
-        with TemporaryDirectory() as directory:
-            marker = Path(directory) / "raw-mode-active.json"
-            commands = []
-            lifecycle = self.make_lifecycle(marker, commands)
-
-            lifecycle.start()
-
-            self.assertTrue(marker.exists())
-            self.assertEqual(commands, [0x08])
-            lifecycle.stop()
-
-    def test_successful_stop_removes_recovery_marker(self):
-        with TemporaryDirectory() as directory:
-            marker = Path(directory) / "raw-mode-active.json"
-            commands = []
-            lifecycle = self.make_lifecycle(marker, commands)
-            lifecycle.start()
-
-            lifecycle.stop()
-
-            self.assertFalse(marker.exists())
-            self.assertEqual(commands, [0x08, 0x0A])
-
-    def test_failed_stop_retains_recovery_marker(self):
-        with TemporaryDirectory() as directory:
-            marker = Path(directory) / "raw-mode-active.json"
-            commands = []
-            lifecycle = self.make_lifecycle(marker, commands, fail_on=0x0A)
-            lifecycle.start()
-
-            with self.assertRaises(OSError):
-                lifecycle.stop()
-
-            self.assertTrue(marker.exists())
-            self.assertEqual(commands, [0x08, 0x0A])
-
-    def test_stale_marker_is_recovered_before_new_start(self):
-        with TemporaryDirectory() as directory:
-            marker = Path(directory) / "raw-mode-active.json"
-            marker.write_text("{}", encoding="utf-8")
-            commands = []
-            lifecycle = self.make_lifecycle(marker, commands)
-
-            lifecycle.start()
-
-            self.assertEqual(commands[:2], [0x0A, 0x08])
-            lifecycle.stop()
-
-    def test_failed_start_attempts_end_and_clears_marker(self):
-        with TemporaryDirectory() as directory:
-            marker = Path(directory) / "raw-mode-active.json"
-            commands = []
-            lifecycle = self.make_lifecycle(marker, commands, fail_on=0x08)
-
-            with self.assertRaises(OSError):
-                lifecycle.start()
-
-            self.assertEqual(commands, [0x08, 0x0A])
-            self.assertFalse(marker.exists())
-
-    def test_stop_sends_end_even_when_prior_status_check_fails(self):
-        with TemporaryDirectory() as directory:
-            marker = Path(directory) / "raw-mode-active.json"
-            commands = []
-            checks = 0
-
-            def check_write(device, verbose=False):
-                nonlocal checks
-                checks += 1
-                if checks == 3:
-                    raise OSError("simulated stale start status")
-
-            def write_feature(device, packet, label, verbose=False):
-                commands.append(packet[2])
-
-            lifecycle = RawModeLifecycle(
-                device=object(),
-                marker_path=marker,
-                check_write=check_write,
-                write_feature=write_feature,
-            )
-            lifecycle.start()
-
-            lifecycle.stop()
-
-            self.assertEqual(commands, [0x08, 0x0A])
-            self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

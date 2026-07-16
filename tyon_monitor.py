@@ -12,8 +12,6 @@ import csv
 import ctypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import json
-import os
 from pathlib import Path
 import queue
 import statistics
@@ -34,6 +32,16 @@ from roccatmouse.diagnostics.models import (
 from roccatmouse.diagnostics.session import CaptureSession
 from roccatmouse.diagnostics.windows.clock import QpcClock
 from roccatmouse.diagnostics.windows.device import TyonDeviceControl
+from roccatmouse.diagnostics.windows.raw_accelerator import (
+    RawAcceleratorSource,
+    RawModeLifecycle,
+    find_paired_vendor_interface,
+    find_raw_interface,
+    open_hid_interface,
+    parse_xcelerator_report,
+    raw_mode_marker_path,
+    xcal_command,
+)
 from roccatmouse.diagnostics.windows.raw_input import RawInputSource
 
 
@@ -42,12 +50,6 @@ JOY_RETURNALL = 0x000000FF
 JOYERR_NOERROR = 0
 JOYERR_UNPLUGGED = 167
 MAX_JOYSTICK_SLOTS = 16
-REPORT_ID_INFO = 0x09
-INFO_SIZE = 0x08
-XCAL_START = 0x08
-XCAL_END = 0x0A
-SPECIAL_REPORT_ID = 0x03
-SPECIAL_TYPE_XCAL = 0xE0
 COEXISTENCE_MIN_RAW_EXCURSION = 10
 COEXISTENCE_MAX_RAW_GAP_MS = 100.0
 COEXISTENCE_MIN_REPORT_HZ = 20.0
@@ -442,146 +444,6 @@ class SpecialReportCapture:
                 yield self.events.get_nowait()
             except queue.Empty:
                 return
-
-
-def parse_xcelerator_report(report: bytes | bytearray | list[int]) -> int | None:
-    """Return the raw 0..255 paddle value from a Tyon calibration report."""
-    data = bytes(report)
-    if len(data) < 5:
-        return None
-    if data[0] != SPECIAL_REPORT_ID or data[2] != SPECIAL_TYPE_XCAL:
-        return None
-    return data[4]
-
-
-def find_raw_interface(infos: list[dict]) -> dict | None:
-    """Find the MI_03 special-input interface used by calibration reports."""
-    for info in infos:
-        if info.get("interface_number") == 3 and info.get("usage_page") == 0x000A:
-            return info
-    return None
-
-
-def find_paired_vendor_interface(infos: list[dict], raw_interface: dict) -> dict | None:
-    """Find the Telephony collection belonging to this raw-interface mouse.
-
-    Choosing the first control collection can operate on another physical Tyon
-    when two are attached, so multiple devices require an unambiguous serial
-    number match.
-    """
-    vendors = [info for info in infos if info.get("usage_page") == 0x000B]
-    if len(vendors) == 1:
-        return vendors[0]
-    raw_serial = raw_interface.get("serial_number")
-    if raw_serial:
-        matches = [info for info in vendors if info.get("serial_number") == raw_serial]
-        if len(matches) == 1:
-            return matches[0]
-    return None
-
-
-def open_hid_interface(hid_module: object, info: dict) -> object:
-    """Open an already-selected HID collection without re-enumerating."""
-    path = info["path"]
-    if isinstance(path, str):
-        path = path.encode()
-    device = hid_module.device()
-    device.open_path(path)
-    return device
-
-
-def xcal_command(function: int) -> bytes:
-    """Build a non-persistent calibration-mode control report."""
-    return bytes((REPORT_ID_INFO, INFO_SIZE, function, 0, 0, 0, 0, 0))
-
-
-def raw_mode_marker_path() -> Path:
-    """Return the per-user marker used to recover interrupted raw sessions."""
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    root = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
-    return root / "RoccatMouse" / "raw-mode-active.json"
-
-
-class RawModeLifecycle:
-    """Pair raw-stream start/end reports and preserve failed cleanup state."""
-
-    def __init__(
-        self,
-        *,
-        device: object,
-        marker_path: Path,
-        check_write: Callable[..., object],
-        write_feature: Callable[..., object],
-        verbose: bool = False,
-    ) -> None:
-        self.device = device
-        self.marker_path = marker_path
-        self.check_write = check_write
-        self.write_feature = write_feature
-        self.verbose = verbose
-        self.active = False
-
-    def _send(self, function: int, label: str, *, cleanup: bool = False) -> None:
-        try:
-            self.check_write(self.device, verbose=self.verbose)
-        except Exception:
-            if not cleanup:
-                raise
-        self.write_feature(
-            self.device,
-            xcal_command(function),
-            label,
-            self.verbose,
-        )
-        # A start report is not complete until the device accepts it. Cleanup
-        # likewise verifies the end report before its recovery marker is gone.
-        if cleanup or function == XCAL_START:
-            self.check_write(self.device, verbose=self.verbose)
-
-    def _write_marker(self) -> None:
-        self.marker_path.parent.mkdir(parents=True, exist_ok=True)
-        self.marker_path.write_text(
-            json.dumps(
-                {
-                    "pid": os.getpid(),
-                    "started_utc": datetime.now(timezone.utc).isoformat(),
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-
-    def recover(self) -> bool:
-        """End a possibly active prior session before starting another."""
-        if not self.marker_path.exists():
-            return False
-        self._send(XCAL_END, "X-Celerator raw stream recovery end", cleanup=True)
-        self.marker_path.unlink(missing_ok=True)
-        self.active = False
-        return True
-
-    def start(self) -> None:
-        if self.marker_path.exists():
-            self.recover()
-        self._write_marker()
-        try:
-            self._send(XCAL_START, "X-Celerator raw stream start")
-        except BaseException:
-            try:
-                self.stop()
-            except Exception:
-                pass
-            raise
-        self.active = True
-
-    def stop(self) -> bool:
-        if not self.active and not self.marker_path.exists():
-            return False
-        self._send(XCAL_END, "X-Celerator raw stream end", cleanup=True)
-        self.marker_path.unlink(missing_ok=True)
-        self.active = False
-        return True
 
 
 def choose_device(devices: list[JoystickInfo], requested: int | None) -> JoystickInfo:
@@ -1133,6 +995,7 @@ def run_raw_monitor(
     raw_device = None
     vendor_device = None
     raw_lifecycle: RawModeLifecycle | None = None
+    raw_source: RawAcceleratorSource | None = None
     raw_input: RawInputSource | None = None
     device_control = TyonDeviceControl()
     fingerprint_before = None
@@ -1172,14 +1035,38 @@ def run_raw_monitor(
     acceptance_issues: list[str] = []
     capture_completed = False
 
-    def drain_input(writer: CsvTelemetryWriter) -> None:
-        nonlocal scroll_events
+    def drain_input(writer: CsvTelemetryWriter, display_now: float | None = None) -> None:
+        nonlocal action_reports, last_raw_ns, next_display, scroll_events
         while True:
             try:
                 event = event_queue.get_nowait()
             except queue.Empty:
                 return
             event_counts[event.kind] = event_counts.get(event.kind, 0) + 1
+            if event.kind == "raw_accelerator":
+                value = int(event.payload["value"])
+                values.append(value)
+                if event.phase is Phase.BASELINE:
+                    baseline_values.append(value)
+                if event.phase is Phase.ACTION:
+                    action_reports += 1
+                    action_values.append(value)
+                    if last_raw_ns is not None:
+                        action_raw_gaps_ms.append(
+                            (event.timestamp.monotonic_ns - last_raw_ns) / 1_000_000.0
+                        )
+                last_raw_ns = event.timestamp.monotonic_ns
+                writer.write_event(event, raw_hex=str(event.payload.get("raw_hex", "")))
+                if display_now is not None and display_now >= next_display:
+                    base = int(statistics.median(baseline_values)) if baseline_values else value
+                    print(
+                        f"\rraw={value:3d} delta={value - base:+4d} "
+                        f"reports={len(values):6d} scroll={scroll_events:4d}",
+                        end="",
+                        flush=True,
+                    )
+                    next_display = display_now + 1.0 / args.display_hz
+                continue
             if event.kind in ("wheel", "horizontal_wheel"):
                 scroll_events += 1
             if event.kind == "wheel":
@@ -1231,6 +1118,16 @@ def run_raw_monitor(
                         raw_input = None
 
                 raw_lifecycle.start()
+                raw_source = RawAcceleratorSource(
+                    session_id,
+                    clock,
+                    lambda: phase,
+                    device=raw_device,
+                    device_id=str(raw_info.get("path", "mi03")),
+                )
+                # The legacy CLI owns this bounded synchronous loop; the same
+                # adapter runs its own worker for long-lived runtime clients.
+                raw_source.start(event_queue.put, threaded=False)
                 started = time.perf_counter()
                 deadline = started + args.duration if args.duration else None
                 next_display = started
@@ -1244,68 +1141,26 @@ def run_raw_monitor(
                 while (deadline is None or time.perf_counter() < deadline) and not (
                     stop_event is not None and stop_event.is_set()
                 ):
-                    report = raw_device.read(64, 25)
+                    raw_source.poll_once()
                     now = time.perf_counter()
-                    if report:
-                        raw_hex = bytes(report).hex(" ")
-                        value = parse_xcelerator_report(report)
-                        if value is None:
-                            unmatched += 1
-                            writer.write_event(
-                                TelemetryEvent(
-                                    session_id,
-                                    clock.now(),
-                                    "mi03_raw",
-                                    "other_report",
-                                    phase,
-                                    {"raw_hex": raw_hex},
-                                    str(raw_info.get("path", "mi03")),
-                                ),
-                                raw_hex=raw_hex,
-                            )
-                        else:
-                            values.append(value)
-                            if now - started <= args.baseline_seconds:
-                                baseline_values.append(value)
-                            stamp = clock.now()
-                            if phase is Phase.ACTION:
-                                action_reports += 1
-                                action_values.append(value)
-                                if last_raw_ns is not None:
-                                    action_raw_gaps_ms.append(
-                                        (stamp.monotonic_ns - last_raw_ns) / 1_000_000.0
-                                    )
-                            last_raw_ns = stamp.monotonic_ns
-                            writer.write_event(
-                                TelemetryEvent(
-                                    session_id,
-                                    stamp,
-                                    "mi03_raw",
-                                    "raw_accelerator",
-                                    phase,
-                                    {"value": value, "raw_hex": raw_hex},
-                                    str(raw_info.get("path", "mi03")),
-                                )
-                            )
-                            if now >= next_display:
-                                base = int(statistics.median(baseline_values)) if baseline_values else value
-                                print(
-                                    f"\rraw={value:3d} delta={value - base:+4d} "
-                                    f"reports={len(values):6d} scroll={scroll_events:4d}",
-                                    end="",
-                                    flush=True,
-                                )
-                                next_display = now + 1.0 / args.display_hz
+                    drain_input(writer, now)
                     if not action_announced and now - started >= args.baseline_seconds:
                         phase = Phase.ACTION
                         instruction = action_progress_message(args)
                         print(f"\nGO: {instruction} Keep the physical wheel untouched.")
                         _progress(on_progress, "action", instruction)
                         action_announced = True
-                    drain_input(writer)
                 capture_completed = not (stop_event is not None and stop_event.is_set())
             finally:
                 phase = Phase.STOPPING
+                if raw_source is not None:
+                    try:
+                        raw_source.stop()
+                    except Exception as exc:
+                        clean_shutdown = False
+                        print(f"Warning: raw accelerator cleanup failed ({exc})", file=sys.stderr)
+                    finally:
+                        unmatched = raw_source.other_report_count
                 if raw_input is not None:
                     try:
                         raw_input.stop()
@@ -1332,11 +1187,12 @@ def run_raw_monitor(
                     "Reconnect the mouse and start another capture to retry cleanup.",
                     file=sys.stderr,
                 )
-        try:
-            if raw_device is not None:
-                raw_device.close()
-        except Exception:
-            pass
+        if raw_source is None:
+            try:
+                if raw_device is not None:
+                    raw_device.close()
+            except Exception:
+                pass
         if vendor_device is not None:
             try:
                 vendor_device.close()
