@@ -18,6 +18,7 @@ last_confirmed: 2026-07-15
 - The normal-mode engine records QPC/UTC ordered WinMM, MI_03, and device-attributed Raw Input events; short live neutral captures preserve all five profile fingerprints.
 - Existing controlled evidence shows stable one-count raw neutral noise, a raw paddle range of 24–210, asymmetric paddle scroll output (38/12), and balanced physical-wheel output (81/74); see `docs/history/2026-07-15-hardware-capture-evidence.md`.
 - Empty controlled paddle/wheel trials now fail explicitly with exit code 5 and exact causes instead of producing a false pass.
+- The final live read confirms active profile 1 maps both paddle directions to scrolling, all five profiles remain readable, and no raw-mode recovery marker exists.
 - Scroll CSVs contain deltas without pointer coordinates; cursor movement is not part of the diagnostic model.
 
 ## Active Work

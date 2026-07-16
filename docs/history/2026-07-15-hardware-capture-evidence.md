@@ -24,6 +24,9 @@ one-input-at-a-time procedure.
 
 ## Current inference
 
+- The final safety read confirmed active profile 1 maps `thumb_paddle_up` to
+  `scroll_up` and `thumb_paddle_down` to `scroll_down`; the physical wheel is
+  also mapped normally.
 - The raw neutral signal is stable in successful untouched baselines.
 - The sensor can traverse a wide range in both directions, approximately
   24–210 in the strongest controlled raw capture.
@@ -46,4 +49,5 @@ button packets and with synthetic wheel packets in both directions. Two attempte
 current-schema controlled windows received no physical wheel packets, so they
 are retained locally as negative runs and do not satisfy hardware acceptance.
 The CLI and GUI now fail such controlled trials explicitly instead of reporting
-success.
+success. A final device read found all five profiles readable and the raw-mode
+recovery marker absent.
