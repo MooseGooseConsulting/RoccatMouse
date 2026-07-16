@@ -1,204 +1,178 @@
-# Live raw X-Celerator overlay implementation plan
+# Reusable X-Celerator diagnostic runtime implementation plan
 
-- Status: Ready for the coexistence spike; overlay implementation is gated on its result
-- Branch: `feature/live-raw-xcelerator-overlay` (stacked on continuous telemetry)
+- Status: In progress on draft PR #6
+- Branch: `feature/live-raw-xcelerator-overlay`
+- Base: stacked on `feature/continuous-windows-telemetry` until PR #5 merges
 - Product target: Windows 11 and the connected ROCCAT Tyon
-- Safety boundary: start/end raw streaming only; never save calibration
+- Safety boundary: raw start/end only; never save calibration
+- Last confirmed: 2026-07-16
 
-## Why
+## Product decision
 
-The reported fault feels as though the X-Celerator remains logically stuck in
-the up direction after the physical paddle has returned to center. Windows then
-receives unwanted alternating or continuing scroll output. The missing evidence
-is the raw paddle value at the moment the owner can see that the physical paddle
-is centered.
+The earlier PowerShell-timed coexistence capture was an execution harness around
+Gate A, not product architecture. It remains uncontrolled evidence and cannot
+qualify the live overlay.
 
-The useful product is therefore a small transparent, always-on-top instrument
-that continuously shows exactly what raw value the mouse reports and records it
-around a symptom marker. It must not claim to detect physical touch or physical
-position. The owner performs that comparison visually.
+PR #6 becomes one integrated diagnostic product. Tray, configurator, CLI,
+qualification, overlay, persistence, export, and later analysis all use the same
+`DiagnosticController` and `DiagnosticRuntime`. No UI opens HID devices directly.
 
-## Verified facts and limitations
+## Target architecture
 
-- Raw calibration streaming emits report `0x03`, type `0xe0`, with the 0..255
-  X-Celerator value in byte 4 at roughly 90 reports per second on this mouse.
-- Raw streaming is entered with function `0x08` and ended with `0x0a`. Function
-  `0x0b`, which saves calibration, is forbidden in diagnostics.
-- The successful normal paddle-only capture recorded 125 Windows scroll events,
-  but every WinMM axis was constant for the entire action phase. WinMM is not a
-  paddle-position source on this hardware.
-- Normal-mode MI_03 monitoring has not produced a continuous paddle-position
-  report. The only verified position stream is calibration raw mode.
-- Windows Raw Input identifies the Tyon but does not say whether a wheel-format
-  event came from the physical wheel or the scroll-mapped paddle.
-- Software cannot detect whether the owner is physically touching or releasing
-  the paddle. `hands off`, `released`, and `physically centered` are owner
-  annotations.
-- Two existing raw captures contain concurrent scroll events; several contain
-  none. Those historical runs did not control and attribute the scroll source
-  rigorously enough to prove that normal paddle scrolling survives raw mode.
+```text
+Tray / Configurator / CLI
+          |
+          v
+DiagnosticController
+          |
+          v
+DiagnosticRuntime + DeviceSessionArbiter
+          |- DeviceControl / RawModeLifecycle
+          |- RawAcceleratorSource (MI_03)
+          |- RawInputSource (Windows output)
+          |- RollingBuffer + RawAggregator
+          `- MarkerWindowRecorder
+                    |
+                    v
+           TelemetryWriter -> SQLite
+                    |
+                    v
+        DiagnosticSnapshot -> OverlayWindow
+```
 
-## Gate A: prove raw display and normal scrolling can coexist
+`DeviceSessionArbiter` permits exactly one normal or raw hardware session.
+Starting qualification or the overlay pauses normal observation. Normal
+observation resumes only after verified raw cleanup. Failed cleanup leaves the
+runtime recovering and blocks another device session.
 
-This gate runs before building the persistent overlay.
+Public runtime facts are `RuntimeMode`, `DeviceIdentity`, `DiagnosticStatus`,
+`DiagnosticSnapshot`, and `QualificationResult`. They describe measured values,
+ordering, durability, cleanup, and exact verdict reasons. They never infer
+`touched`, `released`, or `physically_centered`; those concepts may appear only
+as explicit owner observations attached to markers.
 
-1. Replace the raw runner's global scroll fallback with device-attributed
-   `RawInputSource` for the coexistence test.
-2. Record a labelled normal-output baseline with the physical wheel untouched.
-3. Enter raw streaming through `RawModeLifecycle`, display the live raw value,
-   and record raw values plus Tyon-attributed wheel output on one QPC clock.
-4. During a labelled action phase, move only the paddle slowly up, center,
-   slowly down, center, then repeat quickly in both directions.
-5. Repeat across reconnects until both directions and cleanup behavior are
-   reproducible, ending raw mode and verifying normal scroll behavior and
-   profile fingerprints after every run.
-6. Record whether entering raw mode changes, suppresses, delays, or duplicates
-   paddle-generated scroll output.
+## Implementation sequence and stop conditions
 
-Gate A passes only if raw values and ordinary paddle-generated scroll output are
-both present, correctly ordered, and repeatable while raw mode is active. A
-successful end command and unchanged profiles are mandatory.
+### 1. Shared runtime foundation
 
-If Gate A fails, do not ship the overlay as a simultaneous symptom diagnostic.
-Document that the device cannot expose its raw paddle value without changing the path
-under test. The fallback is a clearly labelled sensor-scope mode launched
-immediately after a symptom, plus external/user observation; it cannot claim
-same-instant causality.
+Status: implemented and reviewed; checkpoint publication to draft PR #6 is the current pause point.
 
-## Overlay behavior after Gate A passes
+- [x] Extract MI_03 parsing, HID pairing, `RawAcceleratorSource`, and
+  `RawModeLifecycle` from `tyon_monitor.py`.
+- [x] Preserve unmatched reports as evidence and forbid calibration-save `0x0b`.
+- [x] Add public runtime/status/snapshot/qualification types without physical-state
+  inference.
+- [x] Add thread-safe exclusive `DeviceSessionArbiter` with sticky recovery.
+- [x] Add platform-neutral, dependency-injected `DiagnosticRuntime` and thin
+  `DiagnosticController`.
+- [x] Cover ordered mixed-source events, normal/raw handoff, cleanup, recovery,
+  stale streams, fingerprint mismatch, and measured-only snapshots.
 
-The overlay is a frameless PySide6 window with configurable opacity and
-always-on-top behavior. It has a lockable click-through mode so it cannot steal
-mouse input during normal work.
+Durable commits: `1f50220`, `99f7cdc`, `2ee5dbb`, `6e05271`, `a8cc506`, `9acc3b2`, `9a9ca81`, `e2c25f6`, and `91ecec9`.
 
-It displays:
+### 2. Incident persistence and export
 
-- current raw value, exactly as reported, from 0 through 255;
-- a large vertical bar/needle so a stuck high or low value is visible at a
-  glance;
-- read-only stored min/mid/max calibration values when the INFO report exposes
-  them successfully;
-- delta from the stored midpoint, labelled as arithmetic rather than inferred
-  physical position;
-- sample age and report rate so a frozen overlay is distinguishable from a
-  frozen sensor value;
-- raw-stream, device connection, persistence, and cleanup-marker status;
-- the most recent Tyon scroll direction as output context, explicitly labelled
-  `Windows output`, not `paddle`;
-- confirmation that a symptom marker was saved.
+Status: next implementation unit.
 
-The overlay never displays `touched`, `released`, or `physically centered` as a
-deduced state. Those words appear only in an owner-authored marker or selected
-trial phase.
+- [ ] Add a configurable 30-second full-rate rolling raw buffer and 30-second
+  post-marker recorder.
+- [ ] Persist one-second raw aggregates for every explicit overlay session:
+  count, first, last, min, max, mean, midpoint crossings, report gaps, and
+  time in endpoint bands.
+- [ ] Add a numbered SQLite migration for raw aggregates, marker windows,
+  deduplicated raw samples, typed owner observations, qualification evidence,
+  and cleanup status.
+- [ ] Persist Windows output immediately on the same QPC/UTC sequence.
+- [ ] Make overlapping marker windows reference each raw event once.
+- [ ] Retain marked sessions until explicit deletion; expire unmarked sessions
+  after 30 days.
+- [ ] Export a reproducible incident bundle with session metadata, raw samples,
+  Windows output, aggregates, markers/observations, fingerprints, and cleanup.
+- [ ] Generate bounded evidence statements: owner-reported center plus endpoint
+  raw supports sensor/device-state fault; baseline raw plus continuing output
+  supports a downstream fault; stale raw is capture failure only.
 
-## Logging model
+Stop condition: storage, overlap, retention, persistence-failure, backpressure,
+export, and non-overclaim tests pass.
 
-Raw values are measured continuously while the owner explicitly runs the
-overlay session. Automatic startup remains disabled until long-running raw mode
-has hardware evidence and an explicit product decision.
+### 3. Integrated qualification
 
-- Keep a configurable full-rate rolling raw buffer. Set its initial duration
-  from measured owner marker latency rather than an arbitrary soak interval.
-- Store one-second raw aggregates for the entire session: count, first, last,
-  min, max, mean, midpoint crossings, report gaps, and time at each extreme
-  band.
-- On **Mark symptom**, immediately retain the rolling pre-marker buffer and
-  continue retaining full-rate samples for the configured post-marker window.
-- Record Tyon-attributed Windows scroll events on the same QPC/UTC timeline.
-- Let the owner attach exact annotations such as `physical paddle centered;
-  overlay still high` or `hands off; unwanted up/down output`.
-- Preserve marked full-rate windows until explicit deletion. Unmarked rolling
-  samples may be overwritten; their one-second aggregates follow normal local
-  retention.
+Status: pending persistence.
 
-This provides continuous measurement without writing every approximately 90 Hz
-sample to permanent storage forever. The marked incident remains full fidelity.
+- [ ] Add **Qualify live paddle monitoring** to tray and Diagnostics page.
+- [ ] Raise a PySide6 qualification window, play a system cue, and wait
+  indefinitely for a recorded **I'm ready** acknowledgement.
+- [ ] Run tool-owned countdown, baseline, GO cue, instructions, verification,
+  cleanup, and result display.
+- [ ] Require two acknowledged controlled passes, one after reconnect.
+- [ ] Each pass requires raw values on both sides of baseline, healthy rate/gaps,
+  Tyon Windows output in both directions, zero Raw Input drops, a complete
+  window, verified cleanup, and unchanged profile fingerprints.
+- [ ] Persist evidence session IDs and exact pass/failure reasons.
+- [ ] Unlock the simultaneous live monitor only after a passing qualification.
+  Otherwise expose only a clearly labelled sensor-scope mode with no
+  simultaneous-output claim.
 
-## Components
+Stop condition: acknowledgement, two-pass/reconnect, failure-reason, cleanup,
+and durable-unlock tests pass offscreen. Physical qualification remains pending
+until the owner operates and reconnects the mouse.
 
-1. Extract a `RawAcceleratorSource` from `tyon_monitor.py` into
-   `roccatmouse/diagnostics/windows/raw_accelerator.py`. It owns MI_03 reads and
-   emits timestamped raw-value events; it does not own lifecycle policy.
-2. Extend the raw lifecycle controller with explicit health state, last-report
-   time, and idempotent cleanup suitable for a long-lived session.
-3. Add an overlay-session runtime that coordinates `RawModeLifecycle`,
-   `RawAcceleratorSource`, `RawInputSource`, the shared QPC clock, the rolling
-   buffer, and durable symptom markers.
-4. Add a numbered SQLite migration for raw one-second aggregates and retained
-   full-rate marker windows. Use batched writes and bounded queues.
-5. Add `roccatmouse/diagnostics/raw_overlay.py` and expose it from both the tray
-   menu and Diagnostics page.
-6. Add a keyboard shortcut and tray action for an immediate marker. Notes may
-   be added after the timestamp is committed.
-7. Add an inspection/export command so a marked raw window and its scroll
-   context can be reviewed without manually querying SQLite.
+### 4. Windows composition and thin CLI
 
-## Lifecycle and safety
+Status: pending runtime persistence.
 
-- Write the recovery marker before sending raw start.
-- Verify the device acknowledges raw start before showing live status.
-- Send raw end on Stop, window close, application exit, exceptions, source
-  stalls, device removal, Windows session end, and recoverable reconnect.
-- Keep the recovery marker when end acknowledgement fails. On the next launch,
-  retry end before allowing a new start.
-- Treat a missing raw report beyond the tested timeout as `stream stalled`, not
-  as a stable paddle value.
-- Never send calibration-save function `0x0b`.
-- Never change button mappings to obtain telemetry in this milestone.
-- Fingerprint all five profile settings/button maps before and after each
-  bounded hardware acceptance run.
+- [ ] Add the Windows adapter factory that pairs stable Tyon identity, control,
+  MI_03 raw input, Raw Input output, and shared QPC clock.
+- [ ] Make `tyon_monitor.py` a thin client of `DiagnosticController` rather than
+  a second session runtime.
+- [ ] Retain historical unattended captures as uncontrolled evidence only; they
+  cannot change qualification state.
+- [ ] Cover disconnect/reconnect, startup recovery, source stalls, cancellation,
+  and every partial-start/cleanup path.
 
-## Tests
+Stop condition: the CLI, tray, and configurator construct the same runtime and
+no UI or CLI path opens HID independently.
 
-Automated tests cover:
+### 5. Live overlay and application integration
 
-- raw report parsing, timestamp order, duplicate and missing reports;
-- start acknowledgement, end acknowledgement, stale-marker recovery, and every
-  cleanup path;
-- coexistence-session ordering of raw values and Raw Input scroll events;
-- rolling-buffer eviction and marker-window promotion;
-- aggregate calculations and report-gap detection;
-- persistence failure, backpressure, device removal, cancellation, and restart;
-- overlay stale-sample state, click-through/opacity settings, and offscreen Qt
-  startup/stop;
-- explicit proof that the software never infers touch or physical position.
+Status: pending qualification implementation.
 
-## Hardware acceptance
+- [ ] Add transparent, frameless, always-on-top `OverlayWindow` with adjustable
+  opacity and lockable click-through mode.
+- [ ] Show raw value/bar, sample age/rate, stale warning, arithmetic baseline
+  delta, stream/persistence/cleanup state, and separately labelled latest
+  `Windows output`.
+- [ ] Add immediate marker, typed owner-observation shortcuts, tray notification,
+  overlay controls, and optional hotkey.
+- [ ] Add tray and Diagnostics-page launch actions. Starting raw overlay pauses
+  normal observation and verified cleanup resumes it.
+- [ ] Test offscreen startup/stop, click-through flag preservation, opacity,
+  stale display, marker confirmation, and absence of inferred physical state.
 
-1. Pass Gate A and commit its exact capture evidence.
-2. Confirm the overlay visibly follows center, full up, center, full down, and
-   center while the owner observes the physical paddle.
-3. Leave the overlay active through normal use until either a real symptom is
-   marked or the owner ends the work session. No arbitrary fixed soak duration
-   is a diagnostic requirement.
-4. When the fault occurs, mark whether the physical paddle is centered and
-   compare that owner statement with the retained raw value and Windows output.
-5. Force-close the process, relaunch, verify stale recovery, and confirm the
-   mouse returns to normal operation.
-6. Verify unchanged profiles and no calibration save in all captured control
-   traffic.
-7. Record memory, CPU, database growth, and report gaps for the actual session;
-   use those measurements to set retention and batching defaults.
+Stop condition: automated UI/runtime tests pass and the live monitor remains
+locked behind persisted qualification.
 
-## What the resulting evidence can say
+### 6. Documentation, review, and hardware acceptance
 
-- `Owner says physically centered; raw remains near high endpoint` supports a
-  sensor/calibration/device-state fault.
-- `Owner says physically centered; raw returns to midpoint; Windows output
-  continues` supports a fault downstream of the raw sensor reading.
-- `Raw display is stale` says nothing about paddle position and is reported as
-  a capture failure.
-- Without an owner annotation, the software can describe raw values and output
-  timing but cannot assert physical position or intent.
+Status: pending implementation.
 
-No calibration, remapping, filtering, or correction is implemented by this
-plan. A correction proposal follows only after a retained real incident makes
-one fault layer materially better supported than the alternatives.
+- [ ] Add the single-runtime ADR and reconcile `architecture.md`, `PROGRESS.md`,
+  and component documentation. The overlay remains `Candidate` until controlled
+  qualification passes and becomes `Current` only when shipped.
+- [ ] Run the complete unit suite, compileall, diff check, and bounded resource
+  tests.
+- [ ] After PR #5 merges, retarget draft PR #6 to `main`.
+- [ ] Self-review PR #6 and address every valid unresolved comment/thread.
+- [ ] Keep PR #6 draft while implementation or hardware acceptance remains.
 
-## Ready condition
+Hardware acceptance requires two acknowledged controlled qualification runs,
+one after reconnect; unchanged profiles; visible endpoint/center tracking; a
+marked export; verified cleanup/recovery; and bounded CPU, memory, and database
+growth during an actual work session.
 
-The overlay scope is ready for review when Gate A passes, the overlay and marker
-window work against the connected mouse, every cleanup/recovery test passes, a
-real or deliberately controlled marked session exports reproducibly, profiles
-remain unchanged, and the documentation states the touch/attribution limits
-without inference.
+## Explicit exclusions
+
+Calibration, remapping, filtering, or other corrective writes remain unavailable.
+A correction proposal begins only after a real marked incident supports one
+intervention and its backup, preview, confirmation, readback, before/after trial,
+and rollback workflow.
