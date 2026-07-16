@@ -1,11 +1,13 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from tyon_monitor import (
     AxisStats,
     CaptureRequest,
     JoystickInfo,
+    RawModeLifecycle,
     choose_device,
     parse_xcelerator_report,
     monitor_args_for_request,
@@ -115,6 +117,88 @@ class RawReportTests(unittest.TestCase):
         self.assertEqual(xcal_command(0x08), bytes((0x09, 0x08, 0x08, 0, 0, 0, 0, 0)))
         self.assertEqual(xcal_command(0x0A), bytes((0x09, 0x08, 0x0A, 0, 0, 0, 0, 0)))
         self.assertNotIn(0x0B, xcal_command(0x08)[2:3] + xcal_command(0x0A)[2:3])
+
+
+class RawModeLifecycleTests(unittest.TestCase):
+    def make_lifecycle(self, marker, commands, *, fail_on=None):
+        def check_write(device, verbose=False):
+            self.assertIsNotNone(device)
+
+        def write_feature(device, packet, label, verbose=False):
+            function = packet[2]
+            if function == 0x08:
+                self.assertTrue(marker.exists(), "marker must predate raw-mode start")
+            commands.append(function)
+            if function == fail_on:
+                raise OSError(f"simulated function {function:#x} failure")
+
+        return RawModeLifecycle(
+            device=object(),
+            marker_path=marker,
+            check_write=check_write,
+            write_feature=write_feature,
+        )
+
+    def test_start_writes_recovery_marker_before_start_report(self):
+        with TemporaryDirectory() as directory:
+            marker = Path(directory) / "raw-mode-active.json"
+            commands = []
+            lifecycle = self.make_lifecycle(marker, commands)
+
+            lifecycle.start()
+
+            self.assertTrue(marker.exists())
+            self.assertEqual(commands, [0x08])
+            lifecycle.stop()
+
+    def test_successful_stop_removes_recovery_marker(self):
+        with TemporaryDirectory() as directory:
+            marker = Path(directory) / "raw-mode-active.json"
+            commands = []
+            lifecycle = self.make_lifecycle(marker, commands)
+            lifecycle.start()
+
+            lifecycle.stop()
+
+            self.assertFalse(marker.exists())
+            self.assertEqual(commands, [0x08, 0x0A])
+
+    def test_failed_stop_retains_recovery_marker(self):
+        with TemporaryDirectory() as directory:
+            marker = Path(directory) / "raw-mode-active.json"
+            commands = []
+            lifecycle = self.make_lifecycle(marker, commands, fail_on=0x0A)
+            lifecycle.start()
+
+            with self.assertRaises(OSError):
+                lifecycle.stop()
+
+            self.assertTrue(marker.exists())
+            self.assertEqual(commands, [0x08, 0x0A])
+
+    def test_stale_marker_is_recovered_before_new_start(self):
+        with TemporaryDirectory() as directory:
+            marker = Path(directory) / "raw-mode-active.json"
+            marker.write_text("{}", encoding="utf-8")
+            commands = []
+            lifecycle = self.make_lifecycle(marker, commands)
+
+            lifecycle.start()
+
+            self.assertEqual(commands[:2], [0x0A, 0x08])
+            lifecycle.stop()
+
+    def test_failed_start_attempts_end_and_clears_marker(self):
+        with TemporaryDirectory() as directory:
+            marker = Path(directory) / "raw-mode-active.json"
+            commands = []
+            lifecycle = self.make_lifecycle(marker, commands, fail_on=0x08)
+
+            with self.assertRaises(OSError):
+                lifecycle.start()
+
+            self.assertEqual(commands, [0x08, 0x0A])
+            self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

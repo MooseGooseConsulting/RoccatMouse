@@ -13,6 +13,8 @@ import csv
 import ctypes
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import json
+import os
 from pathlib import Path
 import queue
 import statistics
@@ -392,6 +394,87 @@ def xcal_command(function: int) -> bytes:
     return bytes((REPORT_ID_INFO, INFO_SIZE, function, 0, 0, 0, 0, 0))
 
 
+def raw_mode_marker_path() -> Path:
+    """Return the per-user marker used to recover interrupted raw sessions."""
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    root = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+    return root / "RoccatMouse" / "raw-mode-active.json"
+
+
+class RawModeLifecycle:
+    """Pair raw-stream start/end reports and preserve failed cleanup state."""
+
+    def __init__(
+        self,
+        *,
+        device: object,
+        marker_path: Path,
+        check_write: Callable[..., object],
+        write_feature: Callable[..., object],
+        verbose: bool = False,
+    ) -> None:
+        self.device = device
+        self.marker_path = marker_path
+        self.check_write = check_write
+        self.write_feature = write_feature
+        self.verbose = verbose
+        self.active = False
+
+    def _send(self, function: int, label: str) -> None:
+        self.check_write(self.device, verbose=self.verbose)
+        self.write_feature(
+            self.device,
+            xcal_command(function),
+            label,
+            self.verbose,
+        )
+
+    def _write_marker(self) -> None:
+        self.marker_path.parent.mkdir(parents=True, exist_ok=True)
+        self.marker_path.write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "started_utc": datetime.now(timezone.utc).isoformat(),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def recover(self) -> bool:
+        """End a possibly active prior session before starting another."""
+        if not self.marker_path.exists():
+            return False
+        self._send(XCAL_END, "X-Celerator raw stream recovery end")
+        self.marker_path.unlink(missing_ok=True)
+        self.active = False
+        return True
+
+    def start(self) -> None:
+        if self.marker_path.exists():
+            self.recover()
+        self._write_marker()
+        try:
+            self._send(XCAL_START, "X-Celerator raw stream start")
+        except BaseException:
+            try:
+                self.stop()
+            except Exception:
+                pass
+            raise
+        self.active = True
+
+    def stop(self) -> bool:
+        if not self.active and not self.marker_path.exists():
+            return False
+        self._send(XCAL_END, "X-Celerator raw stream end")
+        self.marker_path.unlink(missing_ok=True)
+        self.active = False
+        return True
+
+
 def choose_device(devices: list[JoystickInfo], requested: int | None) -> JoystickInfo:
     if requested is not None:
         for device in devices:
@@ -673,7 +756,7 @@ def run_raw_monitor(
 
     raw_device = hid.device()
     vendor_device = None
-    streaming = False
+    raw_lifecycle: RawModeLifecycle | None = None
     capture = ScrollCapture()
     default_output = default_log_path()
     output = Path(args.output) if args.output else default_output.with_name(
@@ -725,10 +808,16 @@ def run_raw_monitor(
         raw_device.open_path(path_value)
         vendor_device, device_name = open_tyon()
         print(f"Opened {device_name} vendor control and MI_03 raw input interfaces.")
-        check_write(vendor_device, verbose=args.verbose)
-        write_feature(vendor_device, xcal_command(XCAL_START),
-                      "X-Celerator raw stream start", args.verbose)
-        streaming = True
+        raw_lifecycle = RawModeLifecycle(
+            device=vendor_device,
+            marker_path=raw_mode_marker_path(),
+            check_write=check_write,
+            write_feature=write_feature,
+            verbose=args.verbose,
+        )
+        if raw_lifecycle.marker_path.exists():
+            print("Recovering an unclean prior raw-mode session before capture.")
+        raw_lifecycle.start()
         started = time.perf_counter()
         deadline = started + args.duration if args.duration else None
         next_display = started
@@ -784,15 +873,17 @@ def run_raw_monitor(
     finally:
         capture.stop()
         print()
-        if streaming and vendor_device is not None:
+        if raw_lifecycle is not None:
             try:
-                check_write(vendor_device, verbose=args.verbose)
-                write_feature(vendor_device, xcal_command(XCAL_END),
-                              "X-Celerator raw stream end", args.verbose)
-                print("Raw calibration-report mode ended; no calibration data was saved.")
+                if raw_lifecycle.stop():
+                    print("Raw calibration-report mode ended; no calibration data was saved.")
             except Exception as exc:
                 print(f"CRITICAL: could not end raw mode cleanly: {exc}", file=sys.stderr)
-                print("Unplug and reconnect the mouse before continuing.", file=sys.stderr)
+                print(
+                    f"Recovery marker retained at {raw_lifecycle.marker_path}. "
+                    "Reconnect the mouse and start another capture to retry cleanup.",
+                    file=sys.stderr,
+                )
         try:
             raw_device.close()
         except Exception:

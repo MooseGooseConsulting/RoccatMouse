@@ -14,6 +14,9 @@ __pycache__/
 # Diagnostic captures
 captures/
 
+# Protocol and platform references (pinned in docs/source-audit.md)
+.references/
+
 # User-local state
 recent.json
 

@@ -1,6 +1,7 @@
-# Roccat Tyon RGB
+# RoccatMouse
 
-A modern Windows replacement for the discontinued Roccat Tyon driver.
+A Windows-first replacement for the discontinued Roccat Tyon driver, combining
+the full Roccat Tyon RGB configurator with controlled hardware diagnostics.
 Configure **RGB lighting, DPI, polling rate, button mappings, onboard macros,
 and per-game profiles** — all written straight to the mouse's onboard flash, so
 your settings survive unplug, reboot, and even moving the mouse to another PC.
@@ -9,6 +10,11 @@ No background service, no telemetry, no account. Just HID feature reports going
 straight to the mouse, in readable Python.
 
 _By **Randolf Hellmann** ([@RandolfHellmann](https://github.com/RandolfHellmann)) · MIT licensed._
+
+This repository retains the configurator's MIT history as its downstream
+product base. Windows diagnostics are developed here; Linux remains a later
+stretch milestone. The exact upstream commits and the GPL reuse boundary are
+recorded in [the source audit](docs/source-audit.md).
 
 ![Screenshot](docs/screenshot.png)
 
@@ -170,7 +176,13 @@ converted to wheel events inside the firmware, `--raw` temporarily enters the
 mouse's calibration-report mode to expose the underlying 0..255 sensor value.
 It always sends the matching end command in cleanup and never sends the
 separate command that saves calibration values, so onboard profiles remain
-unchanged.
+unchanged. While raw mode may be active, a recovery marker is stored at
+`%LOCALAPPDATA%\RoccatMouse\raw-mode-active.json`. The marker is removed only
+after the end command succeeds; if a process is interrupted or cleanup fails,
+the next raw capture attempts the end command before starting a new session.
+
+The repeatable hardware procedure is in
+[the Windows controlled-capture acceptance checklist](docs/windows-capture-acceptance.md).
 
 ## Where settings live
 
