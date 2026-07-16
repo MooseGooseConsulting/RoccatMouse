@@ -207,7 +207,8 @@ The repeatable hardware procedure is in
 ### Continuous observation and symptom markers
 
 Run `tray.bat` when you want RoccatMouse to watch the Tyon over a longer period.
-It does not enable automatic startup. From the tray menu:
+It does not enable automatic startup. Run `tray.bat --start` to begin the
+current session immediately, or use the tray menu:
 
 1. Choose **Start continuous observation**.
 2. Use the mouse normally for as long as needed.

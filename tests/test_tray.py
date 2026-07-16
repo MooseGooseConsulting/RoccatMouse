@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from roccatmouse.diagnostics.observation import ObservationStatus
-from roccatmouse.tray import TrayController
+from roccatmouse.tray import TrayController, build_parser
 
 
 class FakeRuntime:
@@ -50,6 +50,9 @@ class TrayTests(unittest.TestCase):
         self.assertIn("Start continuous observation", labels)
         self.assertIn("Mark symptom now", labels)
         self.assertIn("Open short capture proofs", labels)
+
+    def test_main_accepts_immediate_start_flag(self):
+        self.assertTrue(build_parser().parse_args(["--start"]).start)
 
 
 if __name__ == "__main__":

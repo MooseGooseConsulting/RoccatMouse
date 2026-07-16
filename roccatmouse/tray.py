@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import threading
 
-from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QSystemTrayIcon
 
@@ -173,7 +174,18 @@ class TrayController(QObject):
         self.tray.setToolTip(f"RoccatMouse — observation {state}")
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the RoccatMouse observation tray")
+    parser.add_argument(
+        "--start",
+        action="store_true",
+        help="start continuous observation immediately after the tray opens",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(False)
     config = load_config()
@@ -181,4 +193,6 @@ def main() -> int:
     runtime = ObservationRuntime.windows_default(config)
     controller = TrayController(runtime)
     app.setProperty("roccatmouse_tray_controller", controller)
+    if args.start:
+        QTimer.singleShot(0, controller.start_observation)
     return app.exec()
