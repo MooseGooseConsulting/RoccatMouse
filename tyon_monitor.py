@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: MIT
 """X-Celerator signal and scroll-event diagnostic monitor for Windows.
 
-This tool deliberately uses the Windows multimedia joystick API and never
-sends HID feature/output reports.  It is therefore safe to leave running while
-reproducing paddle jitter or a stuck-scroll event.
+Normal-mode capture is read-only. Explicit raw capture sends only the bounded
+X-Celerator stream start/end commands and never saves calibration values.
 """
 
 from __future__ import annotations
@@ -49,6 +48,9 @@ XCAL_START = 0x08
 XCAL_END = 0x0A
 SPECIAL_REPORT_ID = 0x03
 SPECIAL_TYPE_XCAL = 0xE0
+COEXISTENCE_MIN_RAW_EXCURSION = 10
+COEXISTENCE_MAX_RAW_GAP_MS = 100.0
+COEXISTENCE_MIN_REPORT_HZ = 20.0
 
 TRIAL_ALIASES = {"paddle": TrialLabel.PADDLE_ONLY, "wheel": TrialLabel.WHEEL_ONLY}
 
@@ -119,6 +121,7 @@ def monitor_args_for_request(request: CaptureRequest, output: str) -> argparse.N
         baseline_seconds=request.baseline_seconds,
         away_threshold=1500,
         no_scroll_events=False,
+        coexistence=False,
         output=output,
         verbose=False,
         list=False,
@@ -1104,7 +1107,12 @@ def run_raw_monitor(
     stop_event: threading.Event | None = None,
     summary: dict[str, object] | None = None,
 ) -> int:
-    """Temporarily stream raw paddle reports without saving calibration."""
+    """Temporarily stream raw paddle reports without saving calibration.
+
+    When ``--coexistence`` is selected, raw values and device-attributed Tyon
+    output share one clock and ordered CSV so the hardware gate can determine
+    whether normal paddle scrolling survives calibration-report mode.
+    """
     try:
         import hid
         from tyon_rgb import check_write, enumerate_tyon, write_feature
@@ -1125,45 +1133,60 @@ def run_raw_monitor(
     raw_device = None
     vendor_device = None
     raw_lifecycle: RawModeLifecycle | None = None
-    capture = ScrollCapture()
+    raw_input: RawInputSource | None = None
+    device_control = TyonDeviceControl()
+    fingerprint_before = None
+    try:
+        fingerprint_before = device_control.fingerprint()
+        print("Captured pre-trial fingerprint for all five onboard profiles.")
+    except Exception as exc:
+        print(f"Warning: pre-trial profile fingerprint unavailable ({exc})")
+
+    clock = QpcClock()
+    session_id = str(uuid.uuid4())
+    phase = Phase.PREPARATION
+    event_queue: queue.SimpleQueue[TelemetryEvent] = queue.SimpleQueue()
     default_output = default_log_path()
+    output_label = "tyon-xcelerator-coexistence" if getattr(args, "coexistence", False) else "tyon-xcelerator-raw"
     output = Path(args.output) if args.output else default_output.with_name(
-        default_output.stem.replace("tyon-xcelerator", "tyon-xcelerator-raw") + ".csv"
+        default_output.stem.replace("tyon-xcelerator", output_label) + ".csv"
     )
     output.parent.mkdir(parents=True, exist_ok=True)
-    fields = [
-        "elapsed_ms", "utc", "kind", "trial", "raw_value", "raw_hex",
-        "scroll_dx", "scroll_dy",
-    ]
     values: list[int] = []
+    action_values: list[int] = []
+    action_raw_gaps_ms: list[float] = []
+    last_raw_ns: int | None = None
+    action_reports = 0
     baseline_values: list[int] = []
     scroll_events = 0
+    wheel_directions: set[str] = set()
+    event_counts: dict[str, int] = {}
+    dropped_input_packets = 0
     unmatched = 0
     started = 0.0
     deadline = None
     next_display = 0.0
     clean_shutdown = True
+    input_source_name = "disabled" if args.no_scroll_events else "unavailable"
+    profiles_preserved: bool | None = None
+    acceptance_issues: list[str] = []
+    capture_completed = False
 
-    def write_raw_row(
-        writer: csv.DictWriter,
-        timestamp: float,
-        kind: str,
-        *,
-        value: int | str = "",
-        raw_hex: str = "",
-        dx: int | str = "",
-        dy: int | str = "",
-    ) -> None:
-        writer.writerow({
-            "elapsed_ms": round((timestamp - started) * 1000.0, 3),
-            "utc": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-            "kind": kind,
-            "trial": args.trial,
-            "raw_value": value,
-            "raw_hex": raw_hex,
-            "scroll_dx": dx,
-            "scroll_dy": dy,
-        })
+    def drain_input(writer: CsvTelemetryWriter) -> None:
+        nonlocal scroll_events
+        while True:
+            try:
+                event = event_queue.get_nowait()
+            except queue.Empty:
+                return
+            event_counts[event.kind] = event_counts.get(event.kind, 0) + 1
+            if event.kind in ("wheel", "horizontal_wheel"):
+                scroll_events += 1
+            if event.kind == "wheel":
+                direction = event.payload.get("direction")
+                if event.phase is Phase.ACTION and direction in ("up", "down"):
+                    wheel_directions.add(str(direction))
+            writer.write_event(event)
 
     print("RAW MODE: no calibration values will be saved.")
     print(f"Writing {output.resolve()}")
@@ -1183,60 +1206,119 @@ def run_raw_monitor(
         )
         if raw_lifecycle.marker_path.exists():
             print("Recovering an unclean prior raw-mode session before capture.")
-        raw_lifecycle.start()
-        started = time.perf_counter()
-        deadline = started + args.duration if args.duration else None
-        next_display = started
-        print(
-            f"Leave the paddle untouched for {args.baseline_seconds:g}s, then move and release it. "
-            "Press Ctrl+C to stop."
-        )
-        _progress(on_progress, "baseline", baseline_progress_message(args.baseline_seconds))
-        if not args.no_scroll_events:
-            warning = capture.start()
-            if warning:
-                print(f"Warning: {warning}")
-
+        started_stamp = clock.now()
         with output.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fields)
-            writer.writeheader()
-            action_announced = False
-            while (deadline is None or time.perf_counter() < deadline) and not (
-                stop_event is not None and stop_event.is_set()
-            ):
-                report = raw_device.read(64, 25)
-                now = time.perf_counter()
-                if report:
-                    value = parse_xcelerator_report(report)
-                    if value is None:
-                        unmatched += 1
-                        write_raw_row(writer, now, "other_report", raw_hex=bytes(report).hex(" "))
-                    else:
-                        values.append(value)
-                        if now - started <= args.baseline_seconds:
-                            baseline_values.append(value)
-                        write_raw_row(writer, now, "raw", value=value,
-                                      raw_hex=bytes(report).hex(" "))
-                        if now >= next_display:
-                            base = int(statistics.median(baseline_values)) if baseline_values else value
-                            print(f"\rraw={value:3d} delta={value - base:+4d} reports={len(values):6d} "
-                                  f"scroll={scroll_events:4d}", end="", flush=True)
-                            next_display = now + 1.0 / args.display_hz
-                if not action_announced and now - started >= args.baseline_seconds:
-                    instruction = action_progress_message(args)
-                    print(f"\nGO: {instruction}")
-                    _progress(on_progress, "action", instruction)
-                    action_announced = True
-                for timestamp, dx, dy in capture.drain():
-                    scroll_events += 1
-                    write_raw_row(writer, timestamp, "scroll", dx=dx, dy=dy)
-            for timestamp, dx, dy in capture.drain():
-                scroll_events += 1
-                write_raw_row(writer, timestamp, "scroll", dx=dx, dy=dy)
+            writer = CsvTelemetryWriter(
+                handle,
+                started_ns=started_stamp.monotonic_ns,
+                trial=normalized_trial_label(args.trial),
+                capture_mode=CaptureMode.RAW,
+                ordered_from_sequence=started_stamp.sequence + 1,
+            )
+            try:
+                if not args.no_scroll_events:
+                    raw_input = RawInputSource(session_id, clock, lambda: phase)
+                    try:
+                        raw_input.start(event_queue.put)
+                        input_source_name = "raw_input"
+                        print("Device-attributed Tyon output logging enabled during raw streaming.")
+                    except RuntimeError as exc:
+                        print(f"Warning: device-attributed Raw Input unavailable ({exc})")
+                        try:
+                            raw_input.stop()
+                        except Exception as cleanup_exc:
+                            print(f"Warning: Raw Input startup cleanup failed ({cleanup_exc})")
+                        raw_input = None
+
+                raw_lifecycle.start()
+                started = time.perf_counter()
+                deadline = started + args.duration if args.duration else None
+                next_display = started
+                phase = Phase.BASELINE
+                print(
+                    f"Leave the paddle untouched for {args.baseline_seconds:g}s, then move and release it. "
+                    "Keep the physical wheel untouched. Press Ctrl+C to stop."
+                )
+                _progress(on_progress, "baseline", baseline_progress_message(args.baseline_seconds))
+                action_announced = False
+                while (deadline is None or time.perf_counter() < deadline) and not (
+                    stop_event is not None and stop_event.is_set()
+                ):
+                    report = raw_device.read(64, 25)
+                    now = time.perf_counter()
+                    if report:
+                        raw_hex = bytes(report).hex(" ")
+                        value = parse_xcelerator_report(report)
+                        if value is None:
+                            unmatched += 1
+                            writer.write_event(
+                                TelemetryEvent(
+                                    session_id,
+                                    clock.now(),
+                                    "mi03_raw",
+                                    "other_report",
+                                    phase,
+                                    {"raw_hex": raw_hex},
+                                    str(raw_info.get("path", "mi03")),
+                                ),
+                                raw_hex=raw_hex,
+                            )
+                        else:
+                            values.append(value)
+                            if now - started <= args.baseline_seconds:
+                                baseline_values.append(value)
+                            stamp = clock.now()
+                            if phase is Phase.ACTION:
+                                action_reports += 1
+                                action_values.append(value)
+                                if last_raw_ns is not None:
+                                    action_raw_gaps_ms.append(
+                                        (stamp.monotonic_ns - last_raw_ns) / 1_000_000.0
+                                    )
+                            last_raw_ns = stamp.monotonic_ns
+                            writer.write_event(
+                                TelemetryEvent(
+                                    session_id,
+                                    stamp,
+                                    "mi03_raw",
+                                    "raw_accelerator",
+                                    phase,
+                                    {"value": value, "raw_hex": raw_hex},
+                                    str(raw_info.get("path", "mi03")),
+                                )
+                            )
+                            if now >= next_display:
+                                base = int(statistics.median(baseline_values)) if baseline_values else value
+                                print(
+                                    f"\rraw={value:3d} delta={value - base:+4d} "
+                                    f"reports={len(values):6d} scroll={scroll_events:4d}",
+                                    end="",
+                                    flush=True,
+                                )
+                                next_display = now + 1.0 / args.display_hz
+                    if not action_announced and now - started >= args.baseline_seconds:
+                        phase = Phase.ACTION
+                        instruction = action_progress_message(args)
+                        print(f"\nGO: {instruction} Keep the physical wheel untouched.")
+                        _progress(on_progress, "action", instruction)
+                        action_announced = True
+                    drain_input(writer)
+                capture_completed = not (stop_event is not None and stop_event.is_set())
+            finally:
+                phase = Phase.STOPPING
+                if raw_input is not None:
+                    try:
+                        raw_input.stop()
+                    except Exception as exc:
+                        clean_shutdown = False
+                        print(f"Warning: Raw Input cleanup failed ({exc})", file=sys.stderr)
+                    finally:
+                        dropped_input_packets = raw_input.dropped_packets
+                drain_input(writer)
+                writer.flush_ordered(force=True)
     except KeyboardInterrupt:
         pass
     finally:
-        capture.stop()
         print()
         if raw_lifecycle is not None:
             try:
@@ -1261,6 +1343,16 @@ def run_raw_monitor(
             except Exception:
                 pass
 
+    if fingerprint_before is not None:
+        try:
+            profiles_preserved = device_control.fingerprint() == fingerprint_before
+            if profiles_preserved:
+                print("All five onboard profile fingerprints are unchanged.")
+            else:
+                print("CRITICAL: an onboard profile fingerprint changed.", file=sys.stderr)
+        except Exception as exc:
+            print(f"Warning: post-trial profile fingerprint unavailable ({exc})")
+
     if values:
         baseline = int(statistics.median(baseline_values)) if baseline_values else values[0]
         baseline_span = (
@@ -1273,23 +1365,133 @@ def run_raw_monitor(
         )
         if summary is not None:
             summary.update({
+                "session_id": session_id,
                 "reports": len(values),
+                "action_reports": action_reports,
+                "action_report_hz": (
+                    action_reports / (args.duration - args.baseline_seconds)
+                    if args.duration > args.baseline_seconds
+                    else None
+                ),
                 "baseline": baseline,
                 "baseline_span": baseline_span,
                 "raw_range": (min(values), max(values)),
+                "action_raw_range": (
+                    (min(action_values), max(action_values)) if action_values else None
+                ),
+                "max_raw_gap_ms": max(action_raw_gaps_ms, default=0.0),
                 "scroll_events": scroll_events,
+                "input_source": input_source_name,
+                "event_counts": dict(event_counts),
+                "dropped_input_packets": dropped_input_packets,
+                "wheel_directions": sorted(wheel_directions),
                 "unmatched": unmatched,
                 "clean_shutdown": clean_shutdown,
+                "profiles_preserved": profiles_preserved,
             })
     else:
         print(f"No X-Celerator raw reports received; unmatched reports={unmatched}.")
         if summary is not None:
-            summary.update({"reports": 0, "scroll_events": scroll_events, "unmatched": unmatched,
-                            "clean_shutdown": clean_shutdown})
+            summary.update({"reports": 0, "action_reports": action_reports,
+                            "session_id": session_id,
+                            "scroll_events": scroll_events, "unmatched": unmatched,
+                            "clean_shutdown": clean_shutdown, "input_source": input_source_name,
+                            "dropped_input_packets": dropped_input_packets,
+                            "wheel_directions": sorted(wheel_directions),
+                            "profiles_preserved": profiles_preserved})
+
+    if getattr(args, "coexistence", False):
+        baseline = int(statistics.median(baseline_values)) if baseline_values else None
+        acceptance_issues = raw_coexistence_acceptance(
+            input_source=input_source_name,
+            action_reports=action_reports,
+            action_seconds=args.duration - args.baseline_seconds,
+            wheel_directions=wheel_directions,
+            baseline=baseline,
+            action_min=min(action_values) if action_values else None,
+            action_max=max(action_values) if action_values else None,
+            max_raw_gap_ms=max(action_raw_gaps_ms, default=None),
+            dropped_input_packets=dropped_input_packets,
+            completed_window=capture_completed,
+            clean_shutdown=clean_shutdown,
+            profiles_preserved=profiles_preserved,
+        )
+        if acceptance_issues:
+            print("RAW/OUTPUT COEXISTENCE GATE DID NOT PASS:", file=sys.stderr)
+            for issue in acceptance_issues:
+                print(f"  - {issue}", file=sys.stderr)
+        else:
+            print("RAW/OUTPUT COEXISTENCE GATE PASSED for this bounded trial.")
+        if summary is not None:
+            summary["acceptance_issues"] = acceptance_issues
     print(f"Capture saved: {output.resolve()}")
     if not clean_shutdown:
         return 6
+    if profiles_preserved is False:
+        return 4
+    if acceptance_issues:
+        return 7
     return 0 if values else 3
+
+
+def raw_coexistence_acceptance(
+    *,
+    input_source: str,
+    action_reports: int,
+    action_seconds: float,
+    wheel_directions: set[str],
+    clean_shutdown: bool,
+    profiles_preserved: bool | None,
+    baseline: int | None = None,
+    action_min: int | None = None,
+    action_max: int | None = None,
+    max_raw_gap_ms: float | None = None,
+    dropped_input_packets: int = 0,
+    completed_window: bool = True,
+) -> list[str]:
+    """Return exact reasons a bounded raw/output coexistence trial failed."""
+    issues: list[str] = []
+    if input_source != "raw_input":
+        issues.append("device-attributed Raw Input was unavailable")
+    if not completed_window:
+        issues.append("bounded coexistence window did not complete")
+    if action_reports <= 0:
+        issues.append("no raw accelerator reports were recorded")
+    elif action_seconds <= 0 or action_reports / action_seconds < COEXISTENCE_MIN_REPORT_HZ:
+        report_hz = action_reports / action_seconds if action_seconds > 0 else 0.0
+        issues.append(
+            f"raw report rate {report_hz:.1f}Hz was below {COEXISTENCE_MIN_REPORT_HZ:.1f}Hz"
+        )
+    if baseline is None or action_min is None or action_max is None:
+        issues.append("raw baseline and action range were not recorded")
+    else:
+        if baseline - action_min < COEXISTENCE_MIN_RAW_EXCURSION:
+            issues.append(
+                f"raw action never moved at least {COEXISTENCE_MIN_RAW_EXCURSION} counts "
+                "below baseline"
+            )
+        if action_max - baseline < COEXISTENCE_MIN_RAW_EXCURSION:
+            issues.append(
+                f"raw action never moved at least {COEXISTENCE_MIN_RAW_EXCURSION} counts "
+                "above baseline"
+            )
+    if max_raw_gap_ms is None:
+        issues.append("raw sample-gap health was not recorded")
+    elif max_raw_gap_ms > COEXISTENCE_MAX_RAW_GAP_MS:
+        issues.append(
+            f"raw sample gap {max_raw_gap_ms:.1f}ms exceeded "
+            f"{COEXISTENCE_MAX_RAW_GAP_MS:.1f}ms"
+        )
+    missing = {"up", "down"} - wheel_directions
+    if missing:
+        issues.append("missing Tyon output direction(s): " + ", ".join(sorted(missing)))
+    if dropped_input_packets:
+        issues.append(f"Raw Input dropped {dropped_input_packets} packet(s)")
+    if not clean_shutdown:
+        issues.append("raw mode or input capture did not shut down cleanly")
+    if profiles_preserved is not True:
+        issues.append("profile preservation was not verified")
+    return issues
 
 
 def capture_output_path(request: CaptureRequest) -> Path:
@@ -1338,6 +1540,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list", action="store_true", help="list readable joystick slots")
     parser.add_argument("--raw", action="store_true",
                         help="temporarily stream raw 0..255 paddle reports; never saves calibration")
+    parser.add_argument("--coexistence", action="store_true",
+                        help="with --raw, require device-attributed up/down output during the paddle trial")
     parser.add_argument(
         "--trial",
         choices=(
@@ -1382,6 +1586,12 @@ def main() -> int:
         raise SystemExit("--duration cannot be negative")
     if args.start_delay < 0:
         raise SystemExit("--start-delay cannot be negative")
+    if args.coexistence and (not args.raw or args.trial != "paddle" or args.list):
+        parser.error("--coexistence requires --raw --trial paddle")
+    if args.coexistence and args.no_scroll_events:
+        parser.error("--coexistence cannot be combined with --no-scroll-events")
+    if args.coexistence and args.duration <= args.baseline_seconds:
+        parser.error("--coexistence requires a bounded --duration longer than --baseline-seconds")
     if args.raw and args.trial not in ("paddle", "neutral") and not args.list:
         parser.error("--raw only supports paddle or neutral trials")
     if args.raw and args.trial == "paddle" and args.duration and args.duration <= args.baseline_seconds:

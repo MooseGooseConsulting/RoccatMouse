@@ -29,7 +29,32 @@ comparison. The diagnostic fingerprint compares profile settings and button
 maps. Diagnostics do not write macros; a byte-for-byte macro comparison remains
 a manual configurator/readback check until macro readback is exposed here.
 
-## Raw paddle-sensor trial
+## Raw/output coexistence gate
+
+Before treating a live raw overlay as a simultaneous symptom diagnostic, run
+the bounded coexistence gate:
+
+```pwsh
+.\.venv\Scripts\python.exe tyon_monitor.py --raw --coexistence --trial paddle --start-delay 5 --baseline-seconds 2 --duration 20
+```
+
+1. Leave the paddle and physical wheel untouched through the countdown and
+   two-second baseline.
+2. At `GO`, move only the paddle slowly up, center, slowly down, and center;
+   then repeat both directions more quickly. Never touch the physical wheel.
+3. Let the full window finish. An early stop does not pass.
+4. A pass requires action-phase raw values on both sides of baseline, at least
+   20 reports per second, no raw gap over 100 ms, Tyon-attributed Windows output
+   in both directions, zero Raw Input drops, verified cleanup, and unchanged
+   profile fingerprints.
+5. Exit code 7 or any printed reason is a failed gate, not partial success.
+   Preserve the CSV for diagnosis before repeating.
+
+This is controlled owner attribution, not device-level attribution: Windows
+still cannot distinguish a scroll-mapped paddle from the physical wheel on the
+same Tyon.
+
+## Separate raw paddle-sensor trial
 
 1. Start `capture-paddle.bat`.
 2. Do not touch the paddle or wheel during the two-second baseline.

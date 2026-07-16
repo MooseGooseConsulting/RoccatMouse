@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone
 
 from roccatmouse.diagnostics.csv_sink import CsvTelemetryWriter, normalize_capture_row
-from roccatmouse.diagnostics.models import Phase, TelemetryEvent, Timestamp, TrialLabel
+from roccatmouse.diagnostics.models import CaptureMode, Phase, TelemetryEvent, Timestamp, TrialLabel
 
 
 class CsvTelemetryTests(unittest.TestCase):
@@ -105,6 +105,21 @@ class CsvTelemetryTests(unittest.TestCase):
         self.assertEqual(normalized["trial"], "paddle")
         self.assertEqual(normalized["capture_mode"], "raw")
         self.assertEqual(normalized["raw_value"], "123")
+
+    def test_writes_raw_accelerator_value_and_mode(self):
+        output = io.StringIO()
+        writer = CsvTelemetryWriter(
+            output,
+            started_ns=1_000_000_000,
+            trial=TrialLabel.PADDLE_ONLY,
+            capture_mode=CaptureMode.RAW,
+        )
+        writer.write_event(self.make_event("raw_accelerator", {"value": 207, "raw_hex": "03 00 e0 06 cf"}))
+
+        row = next(csv.DictReader(io.StringIO(output.getvalue())))
+        self.assertEqual(row["capture_mode"], "raw")
+        self.assertEqual(row["raw_value"], "207")
+        self.assertEqual(row["raw_hex"], "03 00 e0 06 cf")
 
 
 if __name__ == "__main__":

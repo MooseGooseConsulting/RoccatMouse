@@ -1,7 +1,7 @@
 # Live raw X-Celerator overlay implementation plan
 
 - Status: Ready for the coexistence spike; overlay implementation is gated on its result
-- Branch: `feature/continuous-windows-telemetry`
+- Branch: `feature/live-raw-xcelerator-overlay` (stacked on continuous telemetry)
 - Product target: Windows 11 and the connected ROCCAT Tyon
 - Safety boundary: start/end raw streaming only; never save calibration
 

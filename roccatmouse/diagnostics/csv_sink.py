@@ -106,6 +106,10 @@ class CsvTelemetryWriter:
         elif event.kind == "button":
             row["mouse_button"] = payload.get("button", "")
             row["pressed"] = payload.get("pressed", "")
+        elif event.kind in ("raw", "raw_accelerator"):
+            row["raw_value"] = payload.get("value", "")
+            if not raw_hex:
+                row["raw_hex"] = payload.get("raw_hex", "")
         if self._next_sequence is None:
             self.writer.writerow(row)
             return
