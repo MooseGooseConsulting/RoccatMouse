@@ -209,11 +209,23 @@ class DiagnosticRuntime:
                 raise RuntimeError("normal observation is not configured")
             session_id = self._new_session_id()
             self._arbiter.acquire_normal(session_id)
+            normal = None
             try:
                 normal = self._normal_factory(session_id, self._clock)
                 normal.start(self._receive_event)
-            except BaseException:
+            except BaseException as start_error:
+                cleanup_errors = []
+                if normal is not None:
+                    for label, cleanup in (("normal stop", normal.stop), ("normal close", normal.close)):
+                        try:
+                            cleanup()
+                        except BaseException as exc:
+                            cleanup_errors.append(f"{label} failed: {exc}")
                 self._arbiter.release_normal(session_id)
+                if cleanup_errors:
+                    raise RuntimeError(
+                        f"{start_error}; cleanup failures: {'; '.join(cleanup_errors)}"
+                    ) from start_error
                 raise
             self._normal_id, self._normal = session_id, normal
         self._notify_status()
@@ -223,9 +235,11 @@ class DiagnosticRuntime:
         with self._lock:
             if self._arbiter.mode is not RuntimeMode.NORMAL or self._normal_id is None:
                 raise RuntimeError("normal observation is not active")
-            self._stop_normal_adapter()
-            self._arbiter.release_normal(self._normal_id)
-            self._normal_id = None
+            try:
+                self._stop_normal_adapter()
+            finally:
+                self._arbiter.release_normal(self._normal_id)
+                self._normal_id = None
         self._notify_status()
 
     def _stop_normal_adapter(self) -> None:
@@ -243,6 +257,37 @@ class DiagnosticRuntime:
             failure = failure or exc
         if failure is not None:
             raise failure
+
+    def _pause_normal_adapter(self) -> None:
+        """Pause normal capture or restore a coherent normal owner on failure."""
+        try:
+            self._stop_normal_adapter()
+        except BaseException as pause_error:
+            rollback_error = None
+            replacement = None
+            try:
+                if self._normal_factory is None or self._normal_id is None:
+                    raise RuntimeError("normal observation cannot be reopened")
+                replacement = self._normal_factory(self._normal_id, self._clock)
+                replacement.start(self._receive_event)
+                self._normal = replacement
+            except BaseException as exc:
+                rollback_error = exc
+                if replacement is not None:
+                    for cleanup in (replacement.stop, replacement.close):
+                        try:
+                            cleanup()
+                        except BaseException:
+                            pass
+                self._normal = None
+                if self._normal_id is not None:
+                    self._arbiter.release_normal(self._normal_id)
+                    self._normal_id = None
+            if rollback_error is not None:
+                raise RuntimeError(
+                    f"normal pause failed: {pause_error}; normal reopen failed: {rollback_error}"
+                ) from pause_error
+            raise
 
     def _resume_normal(self) -> None:
         if self._normal_id is None or self._normal_factory is None:
@@ -271,7 +316,7 @@ class DiagnosticRuntime:
             raw_id = self._new_session_id()
             normal_id = self._normal_id if self._arbiter.mode is RuntimeMode.NORMAL else None
             if normal_id is not None:
-                self._stop_normal_adapter()
+                self._pause_normal_adapter()
                 self._arbiter.handoff_normal_to_raw(normal_id, raw_id, mode=mode)
             else:
                 self._arbiter.acquire_raw(raw_id, mode=mode)
@@ -284,37 +329,46 @@ class DiagnosticRuntime:
             start_stamp = self._clock.now()
             self._expected_sequence = start_stamp.sequence + 1
             bundle = None
-            input_started = lifecycle_started = raw_started = False
+            input_owned = lifecycle_owned = raw_owned = False
             try:
                 bundle = self._raw_factory(raw_id, self._clock, lambda: self._phase)
                 self._raw = bundle
                 self._identity = bundle.identity
                 self._before_fingerprint = bundle.device_control.fingerprint()
-                bundle.input_source.start(self._receive_event); input_started = True
-                bundle.lifecycle.start(); lifecycle_started = True
-                bundle.accelerator_source.start(self._receive_event); raw_started = True
+                input_owned = True
+                bundle.input_source.start(self._receive_event)
+                lifecycle_owned = True
+                bundle.lifecycle.start()
+                raw_owned = True
+                bundle.accelerator_source.start(self._receive_event)
                 self._phase = Phase.ACTION
                 self._stream_health = self._health_value(bundle.accelerator_source)
             except BaseException as start_error:
                 cleanup_verified = True
-                if raw_started:
+                cleanup_errors = []
+                if raw_owned:
                     try: bundle.accelerator_source.stop()
-                    except BaseException: cleanup_verified = False
-                if lifecycle_started:
+                    except BaseException as exc:
+                        cleanup_verified = False; cleanup_errors.append(f"raw source stop failed: {exc}")
+                if lifecycle_owned:
                     try: cleanup_verified = bool(bundle.lifecycle.stop()) and cleanup_verified
-                    except BaseException: cleanup_verified = False
-                if input_started:
+                    except BaseException as exc:
+                        cleanup_verified = False; cleanup_errors.append(f"raw lifecycle end failed: {exc}")
+                if input_owned:
                     try: bundle.input_source.stop()
-                    except BaseException: cleanup_verified = False
-                if bundle is not None and cleanup_verified:
+                    except BaseException as exc:
+                        cleanup_verified = False; cleanup_errors.append(f"input source stop failed: {exc}")
+                if bundle is not None:
                     try: bundle.close()
-                    except BaseException: cleanup_verified = False
+                    except BaseException as exc:
+                        cleanup_verified = False; cleanup_errors.append(f"raw adapter close failed: {exc}")
                 self._arbiter.release_raw(raw_id, cleanup_verified=cleanup_verified)
                 if cleanup_verified:
                     self._raw = None; self._raw_id = None
                     if normal_id is not None: self._resume_normal()
                 else:
-                    self._record_error(f"raw start rollback cleanup unverified: {start_error}")
+                    detail = f": {'; '.join(cleanup_errors)}" if cleanup_errors else ""
+                    self._record_error(f"raw start rollback cleanup unverified: {start_error}{detail}")
                 raise
             self._start_monitor()
         self._notify_status(); self._notify_snapshot()
