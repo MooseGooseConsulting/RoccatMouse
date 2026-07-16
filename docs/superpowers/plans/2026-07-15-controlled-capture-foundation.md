@@ -55,4 +55,4 @@
 - [x] Run compile/import checks for all Python modules.
 - [x] Run hardware-safe discovery/list commands and record whether hardware acceptance is available in this environment.
 - [x] Review the diff against the source plan and verify no GPL source or calibration-save command entered the product.
-- [ ] Commit durable units, push the branch, open or update the reviewable PR, self-review it, and address valid review feedback.
+- [x] Commit durable units, push the branch, open or update the reviewable PR, self-review it, and address valid review feedback.
