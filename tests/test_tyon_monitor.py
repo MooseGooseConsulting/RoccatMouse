@@ -14,6 +14,7 @@ from tyon_monitor import (
     action_progress_message,
     baseline_progress_message,
     choose_device,
+    find_paired_vendor_interface,
     parse_xcelerator_report,
     monitor_args_for_request,
     normal_trial_acceptance,
@@ -185,6 +186,30 @@ class CaptureRequestTests(unittest.TestCase):
 
         run_raw_monitor.assert_not_called()
 
+    @patch("tyon_monitor.run_raw_monitor")
+    def test_raw_mode_rejects_normal_paddle_only_label(self, run_raw_monitor):
+        with patch.object(
+            sys,
+            "argv",
+            ["tyon_monitor.py", "--raw", "--trial", "paddle_only", "--duration", "1"],
+        ):
+            with self.assertRaises(SystemExit):
+                main()
+
+        run_raw_monitor.assert_not_called()
+
+    @patch("tyon_monitor.run_raw_monitor")
+    def test_raw_paddle_duration_must_leave_time_for_action(self, run_raw_monitor):
+        with patch.object(
+            sys,
+            "argv",
+            ["tyon_monitor.py", "--raw", "--trial", "paddle", "--duration", "2", "--baseline-seconds", "2"],
+        ):
+            with self.assertRaises(SystemExit):
+                main()
+
+        run_raw_monitor.assert_not_called()
+
 
 class AxisStatsTests(unittest.TestCase):
     def test_tracks_away_run_and_return(self):
@@ -235,6 +260,26 @@ class RawReportTests(unittest.TestCase):
         self.assertEqual(xcal_command(0x08), bytes((0x09, 0x08, 0x08, 0, 0, 0, 0, 0)))
         self.assertEqual(xcal_command(0x0A), bytes((0x09, 0x08, 0x0A, 0, 0, 0, 0, 0)))
         self.assertNotIn(0x0B, xcal_command(0x08)[2:3] + xcal_command(0x0A)[2:3])
+
+    def test_pairs_raw_and_vendor_interfaces_by_serial_when_multiple_tyons_exist(self):
+        infos = [
+            {"usage_page": 0x000A, "interface_number": 3, "serial_number": "A", "path": "raw-a"},
+            {"usage_page": 0x000B, "serial_number": "A", "path": "vendor-a"},
+            {"usage_page": 0x000B, "serial_number": "B", "path": "vendor-b"},
+        ]
+
+        paired = find_paired_vendor_interface(infos, infos[0])
+
+        self.assertEqual(paired["path"], "vendor-a")
+
+    def test_rejects_ambiguous_vendor_pairing(self):
+        infos = [
+            {"usage_page": 0x000A, "interface_number": 3, "path": "raw-a"},
+            {"usage_page": 0x000B, "path": "vendor-a"},
+            {"usage_page": 0x000B, "path": "vendor-b"},
+        ]
+
+        self.assertIsNone(find_paired_vendor_interface(infos, infos[0]))
 
 
 class RawModeLifecycleTests(unittest.TestCase):
@@ -327,7 +372,7 @@ class RawModeLifecycleTests(unittest.TestCase):
             def check_write(device, verbose=False):
                 nonlocal checks
                 checks += 1
-                if checks == 2:
+                if checks == 3:
                     raise OSError("simulated stale start status")
 
             def write_feature(device, packet, label, verbose=False):

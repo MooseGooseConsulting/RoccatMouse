@@ -8,8 +8,13 @@ Windows cannot reliably distinguish a paddle-generated scroll event from a physi
 
 1. Close other programs that may hold Tyon HID interfaces.
 2. Run the unit suite, `tyon_rgb.py --probe`, `tyon_rgb.py --read`, and `tyon_monitor.py --list`.
-3. Record the active profile and fingerprint all five profiles.
-4. Confirm no raw-mode recovery marker remains.
+3. Record the active profile and fingerprint all five profiles. The current
+   diagnostic fingerprint covers profile settings and button mappings;
+   diagnostics never write macros, and a full macro/host-game-profile comparison
+   remains a manual configurator/readback check until that export exists.
+4. If a raw-mode recovery marker exists, do not delete it. Reconnect the mouse
+   if necessary and start a raw capture so its startup recovery sends the safe
+   end command before any new start command.
 
 ## Trial order
 
@@ -29,7 +34,8 @@ The agent starts and monitors capture, validates report rates, watches cleanup s
 - Trials contain the expected labels and phases in monotonic order.
 - Raw captures show plausible neutral, endpoints, and return behavior with no unmatched-report explosion.
 - Normal paddle and wheel trials record direction/delta behavior independently.
-- Scrolling stops after the paddle returns to neutral.
+- Record whether scrolling stops after the paddle returns to neutral. Continued
+  scrolling is a symptom reproduction to retain and mark, not an invalid trial.
 - Raw mode exits cleanly after normal completion, cancellation, simulated failure, and reconnect.
 - All onboard profiles match their pre-test fingerprint.
 

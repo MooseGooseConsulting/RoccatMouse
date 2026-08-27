@@ -1,6 +1,6 @@
 # Continuous Windows telemetry implementation plan
 
-- Status: Planned
+- Status: Storage/output logging implemented; diagnostic scope superseded by the live raw overlay plan
 - Branch: `feature/continuous-windows-telemetry`
 - Depends on: direct-sensor and normal-output capture proof merged
 
@@ -73,9 +73,9 @@ trials provide stronger attribution when needed.
 - CI validates a fresh database and upgrades from every committed schema fixture.
 - Offscreen tray startup/stop/exit leaves no worker thread running.
 
-## Eight-hour soak
+## Measured stability session
 
-Run continuous observation for eight hours with the Tyon connected. Record initial, one-hour, four-hour, and final process/database metrics. Pass when:
+Run continuous observation through a real normal work session with the Tyon connected and record initial, periodic, and final process/database metrics. The duration is evidence gathering, not an arbitrary diagnostic requirement. Also run accelerated synthetic input long enough to exercise rollover and retention. Pass when:
 
 - the runtime remains responsive;
 - resident memory growth after the first hour stays below 25 MiB;
@@ -89,6 +89,6 @@ Run continuous observation for eight hours with the Tyon connected. Record initi
 
 Open a draft PR as soon as the first coherent storage/runtime slice is pushed so
 implementation and soak progress remain visible. Mark it ready only after the
-automated suite and eight-hour soak pass and their evidence is committed to
+automated suite and measured stability session pass and their evidence is committed to
 `docs/history/`. Self-review continuously, address all valid feedback, merge,
 and update `main` before dashboard work.

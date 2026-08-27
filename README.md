@@ -161,7 +161,9 @@ stream. **Normal paddle output** and **wheel comparison** remain in normal devic
 and record full-rate WinMM axes, MI_03 special reports, and device-attributed
 Win32 Raw Input movement, buttons, and wheel deltas. Every event receives a
 session ID, trial/phase label, QPC monotonic timestamp, UTC timestamp, and strict
-sequence number. A symptom button adds a timestamped operator note.
+sequence number. On this Tyon the WinMM axes remained constant during paddle
+movement, so they are not treated as paddle-position evidence. A symptom button
+adds a timestamped operator note.
 
 The normal capture fingerprints all five profile-settings and button-map
 reports before and after the trial. It does not write device configuration.
@@ -204,6 +206,27 @@ the next raw capture attempts the end command before starting a new session.
 The repeatable hardware procedure is in
 [the Windows controlled-capture acceptance checklist](docs/windows-capture-acceptance.md).
 
+### Continuous observation and symptom markers
+
+Run `tray.bat` when you want RoccatMouse to watch the Tyon over a longer period.
+It does not enable automatic startup. Run `tray.bat --start` to begin the
+current session immediately, or use the tray menu:
+
+1. Choose **Start continuous observation**.
+2. Use the mouse normally for as long as needed.
+3. When the paddle misbehaves, choose **Mark symptom now** immediately. The
+   marker is committed before any note is required. Choose **Mark symptom with
+   note…** when you have time to describe what happened.
+4. Choose **Stop observation** to drain and close the session cleanly.
+
+Continuous mode stores one-second aggregates and discrete Tyon wheel, button,
+anomaly, disconnect, and reconnect events in
+`%LOCALAPPDATA%\RoccatMouse\telemetry.sqlite3`. Marker-centered queries preserve
+at least 30 seconds before and after the symptom. Windows cannot distinguish a
+scroll-mapped paddle from the physical wheel on the same Tyon, so the marker is
+the owner's attribution; bounded direct-sensor captures remain the separate
+sensor-truth tool.
+
 ## Where settings live
 
 GUI preferences, game profiles, and recorded build orders are stored under
@@ -220,6 +243,7 @@ in the mouse's own onboard flash, not on disk.
 | `tyon_widgets.py` | Theme, color wheel, and custom widgets |
 | `tyon_input.py` | Host-side recorder/player (pynput) for the SC2 trainer |
 | `tyon_monitor.py` | Read-only X-Celerator axis and scroll-event monitor |
+| `tray.py` | On-demand continuous observation and symptom-marker tray runtime |
 | `tyon_store.py` | Persistent prefs, game profiles, and build orders |
 | `make_icon.py` | Generates `tyon.ico` for the Desktop shortcut |
 | `rgb.bat` / `gui.bat` | Convenience launchers (use the venv python) |

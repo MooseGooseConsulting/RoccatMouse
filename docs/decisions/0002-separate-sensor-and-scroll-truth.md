@@ -1,11 +1,11 @@
-# ADR 0002: Separate raw sensor truth from normal scroll truth
+# ADR 0002: Separate the device-reported raw value from normal scroll output
 
 - Status: Accepted
 - Date: 2026-07-15
 
 ## Context
 
-Raw calibration-report mode exposes the paddle's analog value, while normal mode exposes the device's mapped Windows behavior. Hardware evidence shows raw mode may suppress ordinary scroll output. Windows also cannot reliably identify whether a scroll event came from the paddle or physical wheel on the same mouse.
+Raw calibration-report mode exposes the device-reported paddle value, while normal mode exposes the device's mapped Windows behavior. It does not expose physical touch. Hardware evidence is mixed on whether raw mode preserves ordinary scroll output. Windows also cannot reliably identify whether a scroll event came from the paddle or physical wheel on the same mouse.
 
 ## Decision
 

@@ -25,7 +25,9 @@ the slot to pass with `--device` for console captures.
 
 Before testing, read the five onboard profiles in the configurator or with
 `tyon_rgb.py --read` and retain the output for the final profile-preservation
-comparison.
+comparison. The diagnostic fingerprint compares profile settings and button
+maps. Diagnostics do not write macros; a byte-for-byte macro comparison remains
+a manual configurator/readback check until macro readback is exposed here.
 
 ## Raw paddle-sensor trial
 
@@ -49,7 +51,9 @@ comparison.
    sequence numbers are strictly increasing without gaps, and the schema has no
    cursor-coordinate columns.
 6. Treat exit code 5 as a failed trial and follow the printed reasons; an empty
-   paddle or wheel signal is never an acceptance pass.
+   paddle or wheel signal is never an acceptance pass. If scrolling continues
+   after release, preserve the capture and mark it as the symptom rather than
+   treating it as an invalid trial.
 
 ## Wheel-only trial
 

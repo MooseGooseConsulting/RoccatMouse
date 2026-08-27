@@ -66,6 +66,20 @@ class CsvTelemetryTests(unittest.TestCase):
         rows = list(csv.DictReader(io.StringIO(output.getvalue())))
         self.assertEqual([row["sequence"] for row in rows], ["1", "2"])
 
+    def test_ordered_writer_rejects_a_missing_sequence_on_forced_flush(self):
+        output = io.StringIO()
+        writer = CsvTelemetryWriter(
+            output,
+            started_ns=1_000_000_000,
+            trial=TrialLabel.PADDLE_ONLY,
+            ordered_from_sequence=1,
+        )
+
+        writer.write_event(self.make_sequenced_event(2, "wheel", {"delta": 120}))
+
+        with self.assertRaisesRegex(ValueError, "sequence gap: expected 1, received 2"):
+            writer.flush_ordered(force=True)
+
     def test_normalizes_foundation_csv_rows(self):
         legacy = {
             "elapsed_ms": "10.0",
@@ -79,8 +93,18 @@ class CsvTelemetryTests(unittest.TestCase):
 
         self.assertEqual(normalized["trial"], "wheel_only")
         self.assertEqual(normalized["source"], "legacy")
-        self.assertEqual(normalized["phase"], "action")
+        self.assertEqual(normalized["phase"], "")
+        self.assertEqual(normalized["capture_mode"], "normal")
         self.assertEqual(normalized["scroll_dy"], "1")
+
+    def test_raw_legacy_rows_preserve_sensor_mode_and_value(self):
+        normalized = normalize_capture_row({
+            "kind": "raw", "trial": "paddle", "raw_value": "123", "raw_hex": "03 00 e0 06 7b",
+        })
+
+        self.assertEqual(normalized["trial"], "paddle")
+        self.assertEqual(normalized["capture_mode"], "raw")
+        self.assertEqual(normalized["raw_value"], "123")
 
 
 if __name__ == "__main__":
